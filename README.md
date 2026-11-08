@@ -105,9 +105,15 @@ python -m venv .venv
 
 ### Opción B: ejecutable autocontenido
 
-**Publicación del ejecutable:**
+**Descarga directa (GitHub Releases):**
 
-La plantilla de publicación [`herramientas/empaquetar.yml.template`](herramientas/empaquetar.yml.template) ejecuta las pruebas, compila el `.exe`, arma el ZIP y publica un Release cuando se copia en `.github/workflows/` y se sube un tag `v1.0.0`. GitHub no ejecuta un `.exe` automáticamente desde el navegador: el Release descarga el ZIP y el usuario lo descomprime.
+[Descargar DulcesitosCastillo v1.0.0 para Windows](https://github.com/MrCastilloF/Dulcesitos_Castillo/releases/latest/download/DulcesitosCastillo-1.0.0-win64.zip)
+
+SHA256: `62b519290c7c618916476b5f3edfb530761d312bba1e273d537f91f909fdbcf7`
+
+El enlace descarga el ZIP. Windows no ejecuta automáticamente un `.exe` desde el navegador: descomprime **toda** la carpeta y ejecuta `DulcesitosCastillo.exe`. También puedes usar el acceso directo [`Descargar_Dulcesitos_Castillo.url`](Descargar_Dulcesitos_Castillo.url).
+
+La plantilla de publicación [`herramientas/empaquetar.yml.template`](herramientas/empaquetar.yml.template) queda para automatizar futuras versiones cuando se copie en `.github/workflows/`.
 
 El ZIP también se puede generar localmente con `construir_exe.bat`; queda en `dist\DulcesitosCastillo-1.0.0-win64.zip`.
 
