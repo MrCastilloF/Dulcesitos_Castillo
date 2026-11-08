@@ -10,15 +10,51 @@ Aplicación de escritorio para **registrar y gestionar el inventario de bodega**
 
 ## Lo que resuelve
 
+- **Un único administrador propietario**; no se pueden crear ni asignar otros administradores.
 - Ingreso de operadores con **cédula + código de acceso** emitido por el administrador.
 - Códigos administrados con **fecha de vencimiento y revocación inmediata**; nunca se muestran de nuevo después de crearlos.
 - Lectura del **archivo maestro** desde `C:\dulcesito_castillo` (Excel, CSV, TXT, TSV o PDF tabular).
 - Detección y estado visible del **lector USB**, con calibración obligatoria.
 - Registro de productos con validación contra el catálogo, **fecha, hora y operador**.
-- Manejo claro de **duplicados**, **no encontrados** y lecturas deshechas.
+- Manejo claro de **duplicados**, **no encontrados**, **registro manual con novedad** y lecturas deshechas.
+- **Ajuste de stock contado** por producto y **altas/bajas locales** de catálogo sin tocar el archivo original.
 - Cierre con dos salidas: **reporte visual imprimible en PDF** y **archivo de actualización** en Excel y TXT.
 - Sesiones persistentes: si el operador cierra sesión o la aplicación termina inesperadamente, sus registros ya están guardados y puede reanudar el trabajo.
-- Panel administrativo separado, con su propia clave, historial, respaldos y configuración del lector.
+- Panel administrativo separado, con su propia clave, historial, respaldos y configuración del lector. El operador no ve ni puede abrir funciones administrativas.
+- Escenario de tienda: el administrador crea, da de baja o reactiva productos, mientras el operador valida y ajusta el stock contado.
+
+## Roles y permisos
+
+Hay exactamente **dos tipos de acceso**:
+
+| Acción | Administrador (único) | Operador |
+| --- | --- | --- |
+| Configurar el acceso de administración | Solo en el primer arranque | No |
+| Crear, renovar, vencer o revocar códigos | Sí | No |
+| Crear otros administradores o cambiar de administrador | **No existe esa opción** | No |
+| Crear productos locales, dar de baja o reactivar | Sí | No |
+| Configurar el lector y consultar historial | Sí | No |
+| Iniciar sesión con un código autorizado | — | Sí |
+| Calibrar el lector y escanear | — | Sí |
+| Ajustar el stock contado de un producto | — | Sí |
+| Registrar manualmente un producto cuando falla el lector | — | Sí |
+| Cerrar el proceso con autorización | Sí (autoriza) | Sí (con clave) |
+| Crear respaldos | Sí | No |
+
+El operador **no tiene botón de administración ni de configuración del lector**. Para entrar al panel, el administrador debe cerrar la sesión del operador y usar **Acceso administración** en la pantalla de ingreso.
+
+### Alta, baja y ajuste de stock
+
+- **Alta:** Admin → **Catálogo** → **Nuevo producto**. Se usan las columnas del maestro; el archivo original no se toca.
+- **Baja:** busca o escanea un producto en **Catálogo**, selecciónalo y pulsa **Dar de baja**. No se borra el historial y se puede **Reactivar** después.
+- **Ajuste de stock:** el operador escanea el producto, ve el **stock del catálogo** y escribe el **stock contado** en el panel derecho. El stock se guarda con fecha, hora y operador.
+- El archivo de actualización reemplaza el valor de la columna de stock para los productos ajustados y agrega las columnas de auditoría **STOCK ORIGINAL**, **STOCK CONTADO** y **DIFERENCIA DE STOCK**.
+- **Registro manual:** si el código no se lee o no tiene coincidencia, el operador pulsa **Registro manual**. El lector se pausa, el operador escribe código, descripción, **novedad** y stock opcional, y el registro queda marcado como **MANUAL** en la tabla y en los archivos.
+- Los productos manuales sin coincidencia se agregan a la salida con la novedad; el archivo maestro no se modifica.
+- Los cambios de catálogo rigen para sesiones nuevas. Una sesión que ya está en curso conserva su copia del catálogo hasta finalizar.
+- Si el operador no ajusta el stock, se conserva el valor del catálogo en la salida.
+
+![Registro manual con el lector en pausa](docs/capturas/06_registro_manual.png)
 
 ## Capturas
 
@@ -69,6 +105,14 @@ python -m venv .venv
 
 ### Opción B: ejecutable autocontenido
 
+**Publicación del ejecutable:**
+
+La plantilla de publicación [`herramientas/empaquetar.yml.template`](herramientas/empaquetar.yml.template) ejecuta las pruebas, compila el `.exe`, arma el ZIP y publica un Release cuando se copia en `.github/workflows/` y se sube un tag `v1.0.0`. GitHub no ejecuta un `.exe` automáticamente desde el navegador: el Release descarga el ZIP y el usuario lo descomprime.
+
+El ZIP también se puede generar localmente con `construir_exe.bat`; queda en `dist\DulcesitosCastillo-1.0.0-win64.zip`.
+
+Para compilarlo localmente:
+
 ```bat
 construir_exe.bat
 ```
@@ -90,28 +134,31 @@ El repositorio incluye un catálogo de ejemplo en [`datos_ejemplo/DEMO_maestro_d
 3. La aplicación lo marcará con la etiqueta **DEMOSTRACIÓN**.
 4. Reemplázalo por el catálogo real antes de operar la bodega.
 
-## Primer administrador (solo una vez)
+## Acceso único del administrador (solo una vez)
+
+La aplicación está diseñada para **un solo administrador: el propietario**. No existe un módulo para crear otros administradores, asignar ese rol ni cambiar de administrador. El botón de configuración aparece únicamente en el primer arranque, cuando todavía no hay una cuenta de administración.
 
 1. Abre la aplicación por primera vez.
-2. Aparecerá **Configuración única · Paso 0**.
+2. Aparecerá **Acceso del propietario · Configuración única**.
 3. Escribe nombre completo, cédula, correo, una clave de administración y su confirmación.
    - Mínimo 10 caracteres, con al menos una letra y un número.
    - No se permiten espacios.
-4. Pulsa **Crear administrador**.
+4. Pulsa **Guardar acceso único**.
 
-No hay credenciales por defecto ni recuperación automática. La clave solo se guarda con **PBKDF2-HMAC-SHA256 + sal aleatoria**. Guárdala en un lugar seguro o en un gestor de contraseñas.
+Después de este paso, el administrador solo puede rotar su propia clave desde el panel; no puede duplicar ni ceder el rol. No hay credenciales por defecto ni recuperación automática. La clave se guarda con **PBKDF2-HMAC-SHA256 + sal aleatoria**. Consérvala en un lugar seguro.
 
 ### Emitir el primer código de operador
 
-1. En la barra superior pulsa **Admin** (o **Acceso administración** en la pantalla de ingreso).
-2. Ingresa la cédula y la clave del administrador.
-3. En **Accesos**, pulsa **Generar código**.
-4. Elige:
+1. Cierra la sesión del operador si hay una abierta.
+2. En la pantalla de ingreso pulsa **Acceso administración**.
+3. Ingresa la cédula y la clave del administrador.
+4. En **Accesos**, pulsa **Generar código**.
+5. Elige:
    - **Invitación libre:** el operador completa sus datos al activar.
    - **Invitación asignada:** el administrador fija nombre, cédula y correo.
    - **Renovar operador:** emite un nuevo acceso y revoca los anteriores.
-5. Define la vigencia en días y pulsa **Generar código seguro**.
-6. **Copia el código en ese momento.** Por seguridad solo se almacena su hash; no se puede volver a mostrar.
+6. Define la vigencia en días y pulsa **Generar código seguro**.
+7. **Copia el código en ese momento.** Por seguridad solo se almacena su hash; no se puede volver a mostrar.
 
 ## Calibración del lector (procedimiento)
 
@@ -129,13 +176,13 @@ Si no aparece el aviso:
 
 - Verifica que el producto escaneado esté en el archivo maestro.
 - Confirma que el lector envía **Enter** al final de cada lectura.
-- Pulsa **Volver a detectar** o revisa el modo en **Admin → Lector**.
+- Pulsa **Volver a detectar**. Si persiste, cierra la sesión del operador y revisa **Acceso administración → Lector**.
 - Si usas puerto serie, selecciona el COM correcto y la velocidad configurada en el lector (por defecto 9600 bps).
 - Un PDF escaneado como imagen no se puede leer sin OCR; expórtalo a Excel o CSV.
 
 ### Configuración del lector
 
-**Admin → Lector** permite elegir:
+**Acceso administración → Lector** permite elegir:
 
 - **USB HID:** no requiere controladores. Es el modo más común (el lector "escribe" el código y envía Enter).
 - **Puerto serie:** selecciona el puerto COM y la velocidad. El lector debe enviar CR/LF al finalizar cada lectura.
@@ -219,7 +266,7 @@ CÉDULA OPERADOR · ID SESIÓN
 | Copias del catálogo por sesión | `%LOCALAPPDATA%\DulcesitosCastillo\sesiones` |
 | Logs | `%LOCALAPPDATA%\DulcesitosCastillo\logs\aplicacion.log` |
 
-**Crear un respaldo:** Admin → **Crear respaldo**. Se guarda una copia consistente en `%LOCALAPPDATA%\DulcesitosCastillo\respaldos`.
+**Crear un respaldo:** **Acceso administración → Crear respaldo**. Se guarda una copia consistente en `%LOCALAPPDATA%\DulcesitosCastillo\respaldos`.
 
 **Restaurar:** cierra la aplicación, reemplaza `inventario.db` por el respaldo y vuelve a abrir.
 
@@ -331,6 +378,9 @@ El informe se guarda en `%LOCALAPPDATA%\DulcesitosCastillo\diagnostico.txt` y co
 | «No se encontró una tabla de productos» | La fila de encabezados debe tener columnas de código y descripción. Revisa los nombres admitidos. |
 | El lector no pasa de HID EN ESPERA | Haz una lectura; Windows no identifica modelos genéricos. Revisa que el lector envíe Enter. |
 | El puerto COM no aparece | Revisa el cable, instala el controlador del fabricante y pulsa **Redetectar**. |
+| El lector no lee un código | Pulsa **Registro manual**; el lector se pausa y puedes digitar código, descripción y novedad. |
+| El código no existe en el maestro | Regístralo manualmente; quedará incluido en la actualización con la novedad. |
+| El producto está dado de baja | El administrador debe reactivarlo desde **Catálogo**. |
 | El código venció o fue revocado | El administrador debe emitir una renovación desde **Accesos → Generar código**. |
 | Error al generar el PDF | Cierra el archivo si está abierto en otro programa y verifica permisos de la carpeta `salidas`. |
 | El operador cerró sesión por error | Al volver a ingresar se ofrece **Reanudar registro** con los datos guardados. |

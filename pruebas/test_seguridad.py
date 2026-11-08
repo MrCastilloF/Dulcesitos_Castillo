@@ -16,7 +16,11 @@ from dulcesitos.seguridad import (
     validar_fortaleza_clave,
     verificar_clave,
 )
-from dulcesitos.servicios import ServicioAdministracion, ServicioAutenticacion
+from dulcesitos.servicios import (
+    ErrorAutenticacion,
+    ServicioAdministracion,
+    ServicioAutenticacion,
+)
 
 
 def test_hash_no_expone_la_clave_y_verifica():
@@ -76,6 +80,19 @@ def test_base_de_datos_no_guarda_credenciales_en_texto_plano(db, admin):
     assert "Cacao2026Seguro" not in admin_fila["clave_hash"]
     # La verificación real sigue funcionando desde el servicio.
     assert auth.autenticar_administrador("1020304050", "Cacao2026Seguro").id == admin.id
+
+
+def test_solo_existe_un_administrador(db, admin):
+    auth = ServicioAutenticacion(db)
+    with pytest.raises(ErrorAutenticacion):
+        auth.crear_administrador_inicial(
+            nombre="Otro Administrador",
+            cedula="9999999999",
+            correo="otro@dulcesitos.local",
+            clave="OtraClave2026",
+            confirmacion="OtraClave2026",
+        )
+    assert db.contar("administradores") == 1
 
 
 def test_hash_guardado_es_compatible_con_sqlite(db, admin):

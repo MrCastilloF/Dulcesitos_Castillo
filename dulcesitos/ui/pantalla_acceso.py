@@ -632,22 +632,23 @@ class PantallaConfiguracionInicial(tk.Frame):
 
         etiqueta(
             cuerpo,
-            "CONFIGURACIÓN ÚNICA · PASO 0",
+            "ACCESO DEL PROPIETARIO · CONFIGURACIÓN ÚNICA",
             fuente=tema_fuente_micro(self),
             color=tema.CARAMELO,
             fondo=tema.SUPERFICIE,
         ).pack(anchor="w")
         etiqueta(
             cuerpo,
-            "Crea el primer administrador",
+            "Configura tu acceso de administrador",
             fuente=tema_fuente_titulo(self),
             color=tema.TEXTO,
             fondo=tema.SUPERFICIE,
         ).pack(anchor="w", pady=(3, 4))
         etiqueta(
             cuerpo,
-            "Esta cuenta podrá emitir, renovar y revocar los códigos de acceso de "
-            "los operadores. No existe recuperación automática de la clave.",
+            "Esta será la única cuenta de administración. No se pueden crear "
+            "otros administradores ni asignar ese rol. Solo tú podrás emitir, "
+            "renovar y revocar los accesos de los operadores.",
             fuente=tema_fuente_pequena(self),
             color=tema.MUTED,
             fondo=tema.SUPERFICIE,
@@ -710,7 +711,7 @@ class PantallaConfiguracionInicial(tk.Frame):
         fila_botones.pack(fill="x", pady=(8, 0))
         self.boton = Boton(
             fila_botones,
-            "Crear administrador",
+            "Guardar acceso único",
             self._crear,
             variante="primario",
             icono="→",
@@ -862,7 +863,7 @@ class PantallaConfiguracionInicial(tk.Frame):
 
     def _mostrar_banner(self, mensaje: str, estado: str) -> None:
         self.banner.mostrar(
-            "Revisa la información" if estado != "error" else "No pudimos crear la cuenta",
+            "Revisa la información" if estado != "error" else "No pudimos guardar el acceso",
             mensaje,
             estado,
         )
@@ -901,18 +902,19 @@ class PantallaConfiguracionInicial(tk.Frame):
             self.app.sonidos.error()
             self._mostrar_banner(str(exc), "error")
             self.boton.configurar_estado("normal")
-            self.boton.configurar_texto("Crear administrador", icono="→")
+            self.boton.configurar_texto("Guardar acceso único", icono="→")
             return
         except Exception as exc:
             self.app.sonidos.error()
             self._mostrar_banner(f"Error inesperado: {exc}", "error")
             self.boton.configurar_estado("normal")
-            self.boton.configurar_texto("Crear administrador", icono="→")
+            self.boton.configurar_texto("Guardar acceso único", icono="→")
             return
         self.app.sonidos.exito()
         self.app.ir_acceso(
             mensaje_exito=(
-                f"Administrador {admin.nombre} creado. Abre el panel de "
-                "administración para emitir el primer código de operador."
+                f"Acceso de administración configurado para {admin.nombre}. "
+                "Abre el panel desde «Acceso administración» para emitir el "
+                "primer código de operador."
             )
         )

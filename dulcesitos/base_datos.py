@@ -5,8 +5,9 @@ claves de administración nunca se escriben en texto plano. Cada lectura se
 confirma de inmediato para que un cierre inesperado de la aplicación no pierda
 el trabajo del operador.
 
-El esquema está versionado en ``PRAGMA user_version``. La versión 1 es la
-inicial y no requiere migración.
+El esquema está versionado en ``PRAGMA user_version``. La versión 4 agrega el
+origen del registro (lector o manual) y la novedad escrita por el operador.
+Las versiones anteriores se actualizan de forma idempotente al abrir la base.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from .modelos import (
 from .utilidades import a_iso, desde_iso
 
 LOG = logging.getLogger(__name__)
-VERSION_ESQUEMA = 1
+VERSION_ESQUEMA = 4
 
 
 class ErrorBaseDatos(RuntimeError):
@@ -147,6 +148,8 @@ CREATE TABLE IF NOT EXISTS registros (
     escaneado_en TEXT NOT NULL,
     operador_nombre TEXT NOT NULL,
     operador_cedula TEXT NOT NULL,
+    origen TEXT NOT NULL DEFAULT 'lector' CHECK (origen IN ('lector', 'manual')),
+    novedad TEXT,
     UNIQUE (sesion_id, codigo_clave)
 );
 
@@ -163,6 +166,40 @@ CREATE TABLE IF NOT EXISTS exportaciones (
 );
 
 CREATE INDEX IF NOT EXISTS ix_exportaciones_sesion ON exportaciones(sesion_id);
+
+CREATE TABLE IF NOT EXISTS catalogo_ajustes (
+    codigo_clave TEXT PRIMARY KEY,
+    codigo TEXT NOT NULL,
+    descripcion TEXT NOT NULL,
+    campos_json TEXT NOT NULL,
+    origen TEXT NOT NULL CHECK (origen IN ('maestro', 'local')),
+    estado TEXT NOT NULL CHECK (estado IN ('activo', 'inactivo')),
+    motivo TEXT,
+    admin_id INTEGER REFERENCES administradores(id) ON DELETE SET NULL,
+    admin_nombre TEXT,
+    creado_en TEXT NOT NULL,
+    actualizado_en TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_catalogo_ajustes_estado
+    ON catalogo_ajustes(estado, origen);
+
+CREATE TABLE IF NOT EXISTS ajustes_stock (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sesion_id INTEGER NOT NULL REFERENCES sesiones(id) ON DELETE CASCADE,
+    registro_id INTEGER NOT NULL UNIQUE REFERENCES registros(id) ON DELETE CASCADE,
+    codigo TEXT NOT NULL,
+    stock_original REAL,
+    stock_nuevo REAL NOT NULL,
+    diferencia REAL,
+    operador_nombre TEXT NOT NULL,
+    operador_cedula TEXT NOT NULL,
+    creado_en TEXT NOT NULL,
+    actualizado_en TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_ajustes_stock_sesion
+    ON ajustes_stock(sesion_id);
 
 CREATE TABLE IF NOT EXISTS ajustes (
     clave TEXT PRIMARY KEY,
@@ -200,16 +237,29 @@ class BaseDatos:
         with self._conexion:
             self._conexion.executescript(ESQUEMA)
             version = self._conexion.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, VERSION_ESQUEMA):
+            if version not in (0, 1, 2, 3, VERSION_ESQUEMA):
                 raise ErrorBaseDatos(
                     "La base de datos fue creada por una versión más reciente "
                     f"(esquema {version}). Actualiza la aplicación."
                 )
+            self._migrar_columnas_registros()
             self._conexion.execute(f"PRAGMA user_version = {VERSION_ESQUEMA}")
             self._conexion.execute(
                 "INSERT OR IGNORE INTO meta(clave, valor) VALUES ('esquema', ?)",
                 (str(VERSION_ESQUEMA),),
             )
+
+    def _migrar_columnas_registros(self) -> None:
+        columnas = {
+            str(fila["name"])
+            for fila in self._conexion.execute("PRAGMA table_info(registros)")
+        }
+        if "origen" not in columnas:
+            self._conexion.execute(
+                "ALTER TABLE registros ADD COLUMN origen TEXT NOT NULL DEFAULT 'lector'"
+            )
+        if "novedad" not in columnas:
+            self._conexion.execute("ALTER TABLE registros ADD COLUMN novedad TEXT")
 
     def cerrar(self) -> None:
         try:
@@ -855,7 +905,15 @@ class BaseDatos:
         self, sesion_id: int, codigo_clave: str
     ) -> RegistroSesion | None:
         fila = self._una(
-            "SELECT * FROM registros WHERE sesion_id = ? AND codigo_clave = ?",
+            """
+            SELECT r.*, a.stock_original AS ajuste_stock_original,
+                   a.stock_nuevo AS ajuste_stock_nuevo,
+                   a.diferencia AS ajuste_diferencia,
+                   a.creado_en AS ajuste_creado_en
+              FROM registros r
+              LEFT JOIN ajustes_stock a ON a.registro_id = r.id
+             WHERE r.sesion_id = ? AND r.codigo_clave = ?
+            """,
             (sesion_id, codigo_clave),
         )
         return self._fila_registro(fila) if fila else None
@@ -873,6 +931,8 @@ class BaseDatos:
         creado_en: str,
         operador_nombre: str | None = None,
         operador_cedula: str | None = None,
+        origen: str = "lector",
+        novedad: str = "",
     ) -> tuple[int, RegistroSesion | None]:
         """Guarda el evento y, si corresponde, el producto, de forma atómica."""
 
@@ -918,8 +978,8 @@ class BaseDatos:
                             INSERT INTO registros
                                 (sesion_id, lectura_id, codigo, codigo_clave,
                                  descripcion, datos_json, escaneado_en,
-                                 operador_nombre, operador_cedula)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 operador_nombre, operador_cedula, origen, novedad)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 sesion_id,
@@ -931,6 +991,8 @@ class BaseDatos:
                                 creado_en,
                                 nombre,
                                 cedula,
+                                origen,
+                                novedad or None,
                             ),
                         )
                     except sqlite3.IntegrityError as exc:
@@ -947,6 +1009,8 @@ class BaseDatos:
                         escaneado_en=desde_iso(creado_en),
                         operador_nombre=nombre,
                         operador_cedula=cedula,
+                        origen=origen,
+                        novedad=novedad or "",
                     )
                 return lectura_id, registro
         except sqlite3.Error as exc:
@@ -957,6 +1021,11 @@ class BaseDatos:
             datos = json.loads(fila["datos_json"])
         except (TypeError, ValueError):
             datos = {}
+        claves = set(fila.keys())
+        stock_original = fila["ajuste_stock_original"] if "ajuste_stock_original" in claves else None
+        stock_nuevo = fila["ajuste_stock_nuevo"] if "ajuste_stock_nuevo" in claves else None
+        diferencia = fila["ajuste_diferencia"] if "ajuste_diferencia" in claves else None
+        ajuste_en = fila["ajuste_creado_en"] if "ajuste_creado_en" in claves else None
         return RegistroSesion(
             id=int(fila["id"]),
             sesion_id=int(fila["sesion_id"]),
@@ -967,6 +1036,12 @@ class BaseDatos:
             escaneado_en=desde_iso(fila["escaneado_en"]),
             operador_nombre=str(fila["operador_nombre"]),
             operador_cedula=str(fila["operador_cedula"]),
+            stock_original=float(stock_original) if stock_original is not None else None,
+            stock_nuevo=float(stock_nuevo) if stock_nuevo is not None else None,
+            stock_diferencia=float(diferencia) if diferencia is not None else None,
+            ajuste_stock_en=desde_iso(ajuste_en),
+            origen=str(fila["origen"] or "lector") if "origen" in claves else "lector",
+            novedad=str(fila["novedad"] or "") if "novedad" in claves else "",
         )
 
     def listar_registros(
@@ -975,9 +1050,14 @@ class BaseDatos:
         orden = "DESC" if descendente else "ASC"
         filas = self._todas(
             f"""
-            SELECT * FROM registros
-             WHERE sesion_id = ?
-             ORDER BY escaneado_en {orden}, id {orden}
+            SELECT r.*, a.stock_original AS ajuste_stock_original,
+                   a.stock_nuevo AS ajuste_stock_nuevo,
+                   a.diferencia AS ajuste_diferencia,
+                   a.creado_en AS ajuste_creado_en
+              FROM registros r
+              LEFT JOIN ajustes_stock a ON a.registro_id = r.id
+             WHERE r.sesion_id = ?
+             ORDER BY r.escaneado_en {orden}, r.id {orden}
             """,
             (sesion_id,),
         )
@@ -986,14 +1066,94 @@ class BaseDatos:
     def ultimo_registro(self, sesion_id: int) -> RegistroSesion | None:
         fila = self._una(
             """
-            SELECT * FROM registros
-             WHERE sesion_id = ?
-             ORDER BY escaneado_en DESC, id DESC
+            SELECT r.*, a.stock_original AS ajuste_stock_original,
+                   a.stock_nuevo AS ajuste_stock_nuevo,
+                   a.diferencia AS ajuste_diferencia,
+                   a.creado_en AS ajuste_creado_en
+              FROM registros r
+              LEFT JOIN ajustes_stock a ON a.registro_id = r.id
+             WHERE r.sesion_id = ?
+             ORDER BY r.escaneado_en DESC, r.id DESC
              LIMIT 1
             """,
             (sesion_id,),
         )
         return self._fila_registro(fila) if fila else None
+
+    def guardar_ajuste_stock(
+        self,
+        *,
+        sesion_id: int,
+        registro_id: int,
+        codigo: str,
+        stock_original: float | None,
+        stock_nuevo: float,
+        diferencia: float | None,
+        operador_nombre: str,
+        operador_cedula: str,
+    ) -> None:
+        ahora = a_iso(datetime.now().astimezone())
+        with self.transaccion() as conexion:
+            sesion = conexion.execute(
+                "SELECT estado FROM sesiones WHERE id = ?", (sesion_id,)
+            ).fetchone()
+            if sesion is None:
+                raise ErrorBaseDatos("La sesión no existe.")
+            if sesion["estado"] != "abierta":
+                raise ErrorBaseDatos("La sesión ya está cerrada.")
+            registro = conexion.execute(
+                "SELECT 1 FROM registros WHERE id = ? AND sesion_id = ?",
+                (registro_id, sesion_id),
+            ).fetchone()
+            if registro is None:
+                raise ErrorBaseDatos("El registro no pertenece a la sesión.")
+            conexion.execute(
+                """
+                INSERT INTO ajustes_stock
+                    (sesion_id, registro_id, codigo, stock_original, stock_nuevo,
+                     diferencia, operador_nombre, operador_cedula, creado_en,
+                     actualizado_en)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(registro_id) DO UPDATE SET
+                    stock_original = excluded.stock_original,
+                    stock_nuevo = excluded.stock_nuevo,
+                    diferencia = excluded.diferencia,
+                    operador_nombre = excluded.operador_nombre,
+                    operador_cedula = excluded.operador_cedula,
+                    actualizado_en = excluded.actualizado_en
+                """,
+                (
+                    sesion_id,
+                    registro_id,
+                    codigo,
+                    stock_original,
+                    stock_nuevo,
+                    diferencia,
+                    operador_nombre,
+                    operador_cedula,
+                    ahora,
+                    ahora,
+                ),
+            )
+
+    def eliminar_ajuste_stock(self, registro_id: int) -> bool:
+        with self.transaccion() as conexion:
+            cur = conexion.execute(
+                "DELETE FROM ajustes_stock WHERE registro_id = ?",
+                (registro_id,),
+            )
+            return cur.rowcount > 0
+
+    def listar_ajustes_stock(self, sesion_id: int) -> list[dict[str, Any]]:
+        filas = self._todas(
+            """
+            SELECT * FROM ajustes_stock
+             WHERE sesion_id = ?
+             ORDER BY actualizado_en DESC, id DESC
+            """,
+            (sesion_id,),
+        )
+        return [dict(fila) for fila in filas]
 
     def deshacer_ultimo(self, sesion_id: int) -> RegistroSesion | None:
         with self.transaccion() as conexion:
@@ -1031,15 +1191,21 @@ class BaseDatos:
                   WHERE sesion_id = ? AND resultado = 'no_encontrado')
                     AS no_encontrados,
                 (SELECT MAX(creado_en) FROM lecturas WHERE sesion_id = ?)
-                    AS ultima_lectura
+                    AS ultima_lectura,
+                (SELECT COUNT(*) FROM ajustes_stock WHERE sesion_id = ?)
+                    AS ajustes_stock,
+                (SELECT COUNT(*) FROM registros
+                  WHERE sesion_id = ? AND origen = 'manual') AS manuales
             """,
-            (sesion_id, sesion_id, sesion_id, sesion_id),
+            (sesion_id, sesion_id, sesion_id, sesion_id, sesion_id, sesion_id),
         )
         return EstadisticasSesion(
             registrados=int(fila["registrados"] or 0),
             duplicados=int(fila["duplicados"] or 0),
             no_encontrados=int(fila["no_encontrados"] or 0),
             ultima_lectura_en=desde_iso(fila["ultima_lectura"]),
+            ajustes_stock=int(fila["ajustes_stock"] or 0),
+            manuales=int(fila["manuales"] or 0),
         )
 
     # ------------------------------------------------------------------
@@ -1080,6 +1246,89 @@ class BaseDatos:
             )
             for fila in filas
         ]
+
+    # ------------------------------------------------------------------
+    # Ajustes locales del catálogo
+    # ------------------------------------------------------------------
+    def listar_ajustes_catalogo(self) -> list[dict[str, Any]]:
+        filas = self._todas(
+            """
+            SELECT * FROM catalogo_ajustes
+             ORDER BY actualizado_en DESC, codigo COLLATE NOCASE
+            """
+        )
+        return [dict(fila) for fila in filas]
+
+    def ajuste_catalogo(self, codigo_clave: str) -> dict[str, Any] | None:
+        fila = self._una(
+            "SELECT * FROM catalogo_ajustes WHERE codigo_clave = ?",
+            (codigo_clave,),
+        )
+        return dict(fila) if fila else None
+
+    def guardar_ajuste_catalogo(
+        self,
+        *,
+        codigo_clave: str,
+        codigo: str,
+        descripcion: str,
+        campos: dict[str, str],
+        origen: str,
+        estado: str,
+        motivo: str | None,
+        admin_id: int | None,
+        admin_nombre: str | None,
+    ) -> None:
+        if origen not in {"maestro", "local"}:
+            raise ValueError("Origen de ajuste no válido.")
+        if estado not in {"activo", "inactivo"}:
+            raise ValueError("Estado de ajuste no válido.")
+        ahora = a_iso(datetime.now().astimezone())
+        datos = json.dumps(campos, ensure_ascii=False)
+        with self.transaccion() as conexion:
+            conexion.execute(
+                """
+                INSERT INTO catalogo_ajustes
+                    (codigo_clave, codigo, descripcion, campos_json, origen,
+                     estado, motivo, admin_id, admin_nombre, creado_en, actualizado_en)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(codigo_clave) DO UPDATE SET
+                    codigo = excluded.codigo,
+                    descripcion = excluded.descripcion,
+                    campos_json = excluded.campos_json,
+                    origen = excluded.origen,
+                    estado = excluded.estado,
+                    motivo = excluded.motivo,
+                    admin_id = excluded.admin_id,
+                    admin_nombre = excluded.admin_nombre,
+                    actualizado_en = excluded.actualizado_en
+                """,
+                (
+                    codigo_clave,
+                    codigo,
+                    descripcion,
+                    datos,
+                    origen,
+                    estado,
+                    motivo,
+                    admin_id,
+                    admin_nombre,
+                    ahora,
+                    ahora,
+                ),
+            )
+
+    def eliminar_ajuste_catalogo(self, codigo_clave: str) -> bool:
+        with self.transaccion() as conexion:
+            cur = conexion.execute(
+                "DELETE FROM catalogo_ajustes WHERE codigo_clave = ?",
+                (codigo_clave,),
+            )
+            return cur.rowcount > 0
+
+    def contar_ajustes_catalogo(self) -> int:
+        fila = self._una("SELECT COUNT(*) AS total FROM catalogo_ajustes")
+        return int(fila["total"]) if fila else 0
 
     # ------------------------------------------------------------------
     # Ajustes y respaldos

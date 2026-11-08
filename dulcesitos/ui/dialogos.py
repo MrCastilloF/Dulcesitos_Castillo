@@ -7,9 +7,19 @@ from collections.abc import Callable
 from tkinter import ttk
 from typing import Any
 
-from ..modelos import EstadisticasSesion, ResultadoAutorizacion, SesionOperador
+from ..archivo_maestro import ArchivoMaestro, convertir_numero
+from ..modelos import (
+    EstadisticasSesion,
+    ResultadoAutorizacion,
+    Sesion,
+    SesionOperador,
+)
 from ..seguridad import validar_fortaleza_clave
-from ..servicios import ErrorAdministracion, ErrorAutenticacion
+from ..servicios import (
+    ErrorAdministracion,
+    ErrorAutenticacion,
+    ErrorInventario,
+)
 from ..utilidades import ErrorValidacion, formatear_fecha_hora
 from . import tema
 from .componentes import (
@@ -695,3 +705,148 @@ class DialogoProgreso(tk.Toplevel):
         except tk.TclError:
             pass
         self.destroy()
+
+
+class DialogoRegistroManual(DialogoBase):
+    """Alta manual cuando el lector no puede leer o no hay coincidencia."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        servicio,
+        sesion: Sesion,
+        maestro: ArchivoMaestro,
+        operador: SesionOperador,
+    ):
+        super().__init__(padre, "Registro manual", ancho=680, alto=710)
+        self.servicio = servicio
+        self.sesion = sesion
+        self.maestro = maestro
+        self.operador = operador
+        self.resultado = None
+        _cabecera_dialogo(
+            self.tenedor,
+            "Registro manual de producto",
+            "Para códigos ilegibles, sin coincidencia o cuando el lector no responde.",
+            icono="MODO MANUAL · LECTOR EN PAUSA",
+        )
+        separador(self.tenedor, tema.BORDE, 1).pack(fill="x")
+        cuerpo = tk.Frame(self.tenedor, bg=tema.FONDO)
+        cuerpo.pack(fill="both", expand=True, padx=26, pady=(14, 8))
+        self.banner = BannerEstado(cuerpo, fondo=tema.FONDO)
+        self.codigo = Campo(
+            cuerpo,
+            "Código del producto",
+            ayuda="Escríbelo tal como aparece en la etiqueta, aunque el lector no lo detecte.",
+            fondo=tema.FONDO,
+            fuente=tema_fuente_cuerpo(cuerpo),
+        )
+        self.codigo.pack(fill="x", pady=(0, 7))
+        self.descripcion = Campo(
+            cuerpo,
+            "Descripción del producto",
+            ayuda="Si el código existe en el catálogo, se usará la descripción oficial.",
+            fondo=tema.FONDO,
+            fuente=tema_fuente_cuerpo(cuerpo),
+        )
+        self.descripcion.pack(fill="x", pady=(0, 7))
+        self.novedad = Campo(
+            cuerpo,
+            "Novedad o motivo",
+            ayuda="Obligatorio. Ej.: etiqueta deteriorada, lector sin respuesta o producto sin match.",
+            fondo=tema.FONDO,
+            fuente=tema_fuente_cuerpo(cuerpo),
+        )
+        self.novedad.pack(fill="x", pady=(0, 7))
+        self.stock = None
+        if maestro.columna_stock:
+            self.stock = Campo(
+                cuerpo,
+                "Stock contado (opcional)",
+                ayuda="Déjalo vacío para conservar el stock del catálogo.",
+                fondo=tema.FONDO,
+                fuente=tema_fuente_cuerpo(cuerpo),
+                on_enter=self._guardar,
+            )
+            self.stock.pack(fill="x", pady=(0, 7))
+        aviso = tk.Frame(cuerpo, bg=tema.AZUL_FONDO)
+        aviso.pack(fill="x", pady=(2, 0))
+        etiqueta(
+            aviso,
+            "La lectura del lector está pausada mientras este formulario esté abierto. "
+            "Al cerrarlo, la estación vuelve a quedar lista para escanear.",
+            fuente=tema_fuente_micro(aviso),
+            color=tema.AZUL_CLARO,
+            fondo=tema.AZUL_FONDO,
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=11, pady=8)
+        pie = tk.Frame(self.tenedor, bg=tema.FONDO)
+        pie.pack(fill="x", side="bottom", padx=26, pady=(8, 18))
+        self.boton_guardar = Boton(
+            pie,
+            "Registrar manual",
+            self._guardar,
+            variante="primario",
+            icono="✓",
+            ancho=190,
+            alto=43,
+            fondo=tema.FONDO,
+        )
+        self.boton_guardar.pack(side="right")
+        Boton(
+            pie,
+            "Cancelar y volver al lector",
+            self.cerrar,
+            variante="fantasma",
+            ancho=208,
+            alto=40,
+            fondo=tema.FONDO,
+        ).pack(side="right", padx=(0, 8))
+        self.after(100, self.codigo.enfocar)
+
+    def _mostrar_error(self, mensaje: str) -> None:
+        self.banner.mostrar(
+            "No se pudo registrar manualmente", mensaje, "error"
+        )
+        if not self.banner.winfo_manager():
+            self.banner.pack(fill="x", pady=(0, 8), before=self.codigo)
+
+    def _guardar(self) -> None:
+        stock = None
+        if self.stock is not None:
+            texto = self.stock.get().strip()
+            if texto:
+                stock = convertir_numero(texto)
+                if stock is None:
+                    self._mostrar_error(
+                        "El stock contado debe ser un número válido."
+                    )
+                    self.stock.enfocar()
+                    return
+        self.boton_guardar.configurar_estado("deshabilitado")
+        self.boton_guardar.configurar_texto("Registrando…")
+        self.update_idletasks()
+        try:
+            registro = self.servicio.registrar_manual(
+                sesion=self.sesion,
+                maestro=self.maestro,
+                operador=self.operador,
+                codigo=self.codigo.get(),
+                descripcion=self.descripcion.get(),
+                novedad=self.novedad.get(),
+                stock=stock,
+            )
+        except ErrorInventario as exc:
+            self.boton_guardar.configurar_estado("normal")
+            self.boton_guardar.configurar_texto("Registrar manual", icono="✓")
+            self._mostrar_error(str(exc))
+            return
+        except Exception as exc:
+            self.boton_guardar.configurar_estado("normal")
+            self.boton_guardar.configurar_texto("Registrar manual", icono="✓")
+            self._mostrar_error(f"Error inesperado: {exc}")
+            return
+        self.resultado = registro
+        self.cerrar()

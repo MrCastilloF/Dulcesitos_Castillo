@@ -240,17 +240,7 @@ class PantallaEstacion(tk.Frame):
             fondo=tema.SUPERFICIE,
             takefocus=False,
         ).pack(side="right")
-        Boton(
-            pie,
-            "Configurar",
-            self.app.abrir_panel_admin,
-            variante="fantasma",
-            ancho=100,
-            alto=32,
-            fuente=tema_fuente_pequena(pie),
-            fondo=tema.SUPERFICIE,
-            takefocus=False,
-        ).pack(side="right", padx=(0, 4))
+
 
     def _dibujar_icono_lector(self, color: str) -> None:
         c = self._icono_lector
@@ -469,6 +459,17 @@ class PantallaEstacion(tk.Frame):
                     fondo=tema.SUPERFICIE_2,
                 ).pack(anchor="w", padx=8, pady=(0, 5))
 
+            if maestro.ajustes_locales:
+                etiqueta(
+                    contenido,
+                    f"Incluye {maestro.ajustes_locales} ajuste(s) local(es) de "
+                    "altas y bajas del administrador.",
+                    fuente=tema_fuente_micro(contenido),
+                    color=tema.AZUL_CLARO,
+                    fondo=tema.SUPERFICIE,
+                    wraplength=370,
+                    justify="left",
+                ).pack(anchor="w", pady=(8, 0))
             if maestro.advertencias:
                 etiqueta(
                     contenido,

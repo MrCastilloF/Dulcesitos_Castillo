@@ -146,10 +146,41 @@ panel._autenticar()
 actualizar(app)
 assert panel.admin is not None
 assert panel._seccion_actual == "accesos"
-for seccion in ("operadores", "lector", "historial"):
+for seccion in ("operadores", "catalogo", "lector", "historial"):
     panel._mostrar_seccion(seccion)
     actualizar(app)
 print("✓ Panel administrativo y sus secciones")
+
+# Escenario de catálogo: alta local, baja y reactivación desde los servicios.
+from dulcesitos.catalogo import ServicioCatalogo
+
+catalogo = ServicioCatalogo(db)
+maestro_bruto = app.cargar_maestro_para_administracion()
+nuevo = catalogo.crear_producto(
+    admin=admin,
+    maestro=maestro_bruto,
+    codigo="7709999123456",
+    descripcion="Dulce nuevo de temporada",
+    campos={"Categoría": "Dulces", "Precio": "4500", "Stock": "20"},
+)
+assert app.catalogo.aplicar(maestro_bruto).buscar(nuevo.codigo) is not None
+catalogo.dar_de_baja(
+    admin=admin,
+    maestro=maestro_bruto,
+    codigo=nuevo.codigo,
+    motivo="Prueba de baja",
+)
+assert app.catalogo.aplicar(maestro_bruto).buscar(nuevo.codigo) is None
+catalogo.reactivar(admin=admin, maestro=maestro_bruto, codigo=nuevo.codigo)
+assert app.catalogo.aplicar(maestro_bruto).buscar(nuevo.codigo) is not None
+print("✓ Altas, bajas y reactivación de catálogo")
+
+# Bloqueo de una sesión si se revoca el código del operador.
+panel._mostrar_seccion("accesos")
+actualizar(app)
+app.administracion.revocar_operador(admin, app.operador.operador_id)
+assert not app.auth.sesion_operador_vigente(app.operador)
+print("✓ Revocación inmediata detectable por la sesión")
 app._cerrando = True
 panel._cerrando = True
 panel.destroy()

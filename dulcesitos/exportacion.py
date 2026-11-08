@@ -45,7 +45,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from .archivo_maestro import ArchivoMaestro
+from .archivo_maestro import ArchivoMaestro, convertir_numero, formatear_cantidad
 from .config import (
     APP_AUTHOR,
     APP_NAME,
@@ -117,10 +117,20 @@ def _valor_pdf(valor: object) -> str:
     return html.escape(str(valor or ""), quote=True)
 
 
-def _encabezados_auditoria(originales: Sequence[str]) -> list[str]:
+def _encabezados_auditoria(
+    originales: Sequence[str],
+    *,
+    incluir_stock: bool = False,
+    incluir_manual: bool = False,
+) -> list[str]:
     vistos = {str(c).casefold() for c in originales}
     resultado: list[str] = []
-    for base in AUDITORIA:
+    nombres = list(AUDITORIA)
+    if incluir_stock:
+        nombres.extend(["STOCK ORIGINAL", "STOCK CONTADO", "DIFERENCIA DE STOCK"])
+    if incluir_manual:
+        nombres.extend(["ORIGEN DEL REGISTRO", "NOVEDAD MANUAL"])
+    for base in nombres:
         candidato = base
         contador = 2
         while candidato.casefold() in vistos:
@@ -129,6 +139,12 @@ def _encabezados_auditoria(originales: Sequence[str]) -> list[str]:
         vistos.add(candidato.casefold())
         resultado.append(candidato)
     return resultado
+
+
+def _numero_celda(valor: float | None) -> float | int | None:
+    if valor is None:
+        return None
+    return int(valor) if float(valor).is_integer() else valor
 
 
 def _base_archivos(operador: SesionOperador, momento: datetime) -> tuple[str, str]:
@@ -177,16 +193,37 @@ def _escribir_tabla_actualizacion(
     registros: Sequence[RegistroSesion],
     solo_registrados: bool,
 ) -> tuple[int, int]:
-    auditadas = _encabezados_auditoria(maestro.columnas)
+    incluir_stock = bool(maestro.columna_stock)
+    incluir_manual = any(r.es_manual for r in registros)
+    auditadas = _encabezados_auditoria(
+        maestro.columnas,
+        incluir_stock=incluir_stock,
+        incluir_manual=incluir_manual,
+    )
     encabezados = list(maestro.columnas) + auditadas
     hoja.append(encabezados)
     _estilo_encabezado(hoja, len(encabezados))
 
     por_clave = {r.codigo_clave: r for r in registros}
-    filas = registros if solo_registrados else maestro.registros
+    if solo_registrados:
+        filas = list(registros)
+    else:
+        claves_maestro = {r.codigo_clave for r in maestro.registros}
+        manuales_nuevos = [
+            r
+            for r in registros
+            if r.es_manual and r.codigo_clave not in claves_maestro
+        ]
+        filas = list(maestro.registros) + manuales_nuevos
     relleno_verde = PatternFill("solid", fgColor="ECFDF5")
     relleno_alterno = PatternFill("solid", fgColor=CREMA)
     alineacion = Alignment(vertical="top", wrap_text=True)
+    columnas_lista = list(maestro.columnas)
+    indice_stock = (
+        columnas_lista.index(maestro.columna_stock)
+        if maestro.columna_stock in columnas_lista
+        else None
+    )
 
     for indice, origen in enumerate(filas, start=1):
         if solo_registrados:
@@ -197,7 +234,15 @@ def _escribir_tabla_actualizacion(
             codigo_clave = origen.codigo_clave
             campos = origen.campos
             item = por_clave.get(codigo_clave)
-        valores = [_texto_seguro(campos.get(col, "")) for col in maestro.columnas]
+        valores: list[Any] = [
+            _texto_seguro(campos.get(col, "")) for col in maestro.columnas
+        ]
+        if (
+            item is not None
+            and item.stock_nuevo is not None
+            and indice_stock is not None
+        ):
+            valores[indice_stock] = _numero_celda(item.stock_nuevo)
         if item:
             valores.extend(
                 [
@@ -210,6 +255,32 @@ def _escribir_tabla_actualizacion(
             )
         else:
             valores.extend(["NO", None, None, None, sesion.id])
+        if incluir_stock:
+            if item:
+                original = item.stock_original
+                if original is None:
+                    original = convertir_numero(
+                        campos.get(maestro.columna_stock or "", "")
+                    )
+                valores.extend(
+                    [
+                        _numero_celda(original),
+                        _numero_celda(item.stock_nuevo),
+                        _numero_celda(item.stock_diferencia),
+                    ]
+                )
+            else:
+                valores.extend([None, None, None])
+        if incluir_manual:
+            if item:
+                valores.extend(
+                    [
+                        "MANUAL" if item.es_manual else "LECTOR",
+                        item.novedad if item.es_manual else "",
+                    ]
+                )
+            else:
+                valores.extend([None, None])
         hoja.append(valores)
         fila_actual = hoja.max_row
         for columna in range(1, len(encabezados) + 1):
@@ -301,6 +372,8 @@ def _crear_hoja_resumen(
         ("Archivo maestro original", maestro.nombre),
         ("Ruta del catálogo", str(maestro.ruta)),
         ("Productos en el catálogo", maestro.total),
+        ("Ajustes de stock aplicados", estadisticas.ajustes_stock),
+        ("Registros manuales", estadisticas.manuales),
         ("Huella SHA-256 del catálogo", maestro.huella),
     ]
     for etiqueta, valor in pares:
@@ -449,9 +522,27 @@ def _generar_txt(
     maestro: ArchivoMaestro,
     registros: Sequence[RegistroSesion],
 ) -> None:
-    auditadas = _encabezados_auditoria(maestro.columnas)
+    incluir_stock = bool(maestro.columna_stock)
+    incluir_manual = any(r.es_manual for r in registros)
+    auditadas = _encabezados_auditoria(
+        maestro.columnas,
+        incluir_stock=incluir_stock,
+        incluir_manual=incluir_manual,
+    )
     encabezados = list(maestro.columnas) + auditadas
     por_clave = {r.codigo_clave: r for r in registros}
+    claves_maestro = {r.codigo_clave for r in maestro.registros}
+    manuales_nuevos = [
+        r
+        for r in registros
+        if r.es_manual and r.codigo_clave not in claves_maestro
+    ]
+    columnas_lista = list(maestro.columnas)
+    indice_stock = (
+        columnas_lista.index(maestro.columna_stock)
+        if maestro.columna_stock in columnas_lista
+        else None
+    )
     with ruta.open("w", encoding="utf-8-sig", newline="") as archivo:
         escritor = csv.writer(
             archivo,
@@ -460,12 +551,18 @@ def _generar_txt(
             quoting=csv.QUOTE_MINIMAL,
         )
         escritor.writerow(encabezados)
-        for registro_maestro in maestro.registros:
+        for registro_maestro in [*maestro.registros, *manuales_nuevos]:
             item = por_clave.get(registro_maestro.codigo_clave)
-            fila = [
+            fila: list[Any] = [
                 _texto_seguro(registro_maestro.campos.get(col, ""))
                 for col in maestro.columnas
             ]
+            if (
+                item is not None
+                and item.stock_nuevo is not None
+                and indice_stock is not None
+            ):
+                fila[indice_stock] = formatear_cantidad(item.stock_nuevo)
             if item:
                 fila.extend(
                     [
@@ -478,6 +575,32 @@ def _generar_txt(
                 )
             else:
                 fila.extend(["NO", "", "", "", sesion.id])
+            if incluir_stock:
+                if item:
+                    original = item.stock_original
+                    if original is None:
+                        original = convertir_numero(
+                            registro_maestro.campos.get(maestro.columna_stock or "", "")
+                        )
+                    fila.extend(
+                        [
+                            formatear_cantidad(original),
+                            formatear_cantidad(item.stock_nuevo),
+                            formatear_cantidad(item.stock_diferencia),
+                        ]
+                    )
+                else:
+                    fila.extend(["", "", ""])
+            if incluir_manual:
+                if item:
+                    fila.extend(
+                        [
+                            "MANUAL" if item.es_manual else "LECTOR",
+                            item.novedad if item.es_manual else "",
+                        ]
+                    )
+                else:
+                    fila.extend(["", ""])
             escritor.writerow(fila)
 
 
@@ -782,11 +905,28 @@ def _tabla_productos(
             if columna in {
                 maestro.columna_codigo,
                 maestro.columna_descripcion,
+                maestro.columna_stock,
             }:
                 continue
             valor = registro.campos.get(columna, "").strip()
             if valor:
                 extras.append(f"{columna}: {valor}")
+        if registro.stock_nuevo is not None:
+            original = (
+                formatear_cantidad(registro.stock_original)
+                if registro.stock_original is not None
+                else "—"
+            )
+            extras.append(
+                f"Stock ajustado: {formatear_cantidad(registro.stock_nuevo)} "
+                f"(antes {original})"
+            )
+        elif maestro.columna_stock:
+            valor_stock = registro.campos.get(maestro.columna_stock, "").strip()
+            if valor_stock:
+                extras.append(f"Stock: {valor_stock}")
+        if registro.es_manual:
+            extras.append(f"Registro manual: {registro.novedad or 'sin novedad'}")
         detalle = unir_valores(extras) if extras else "Sin campos adicionales"
         filas.append(
             [
@@ -941,7 +1081,15 @@ def _generar_pdf(
     historia.append(_tabla_metricas(estadisticas))
     historia.append(Spacer(1, 3 * mm))
     historia.append(_tabla_info(sesion, operador, autorizacion, maestro))
-    historia.append(Spacer(1, 4 * mm))
+    historia.append(Spacer(1, 2 * mm))
+    historia.append(
+        Paragraph(
+            f"Ajustes de stock aplicados: <b>{estadisticas.ajustes_stock}</b> · "
+            f"Registros manuales: <b>{estadisticas.manuales}</b>",
+            estilos["nota"],
+        )
+    )
+    historia.append(Spacer(1, 3 * mm))
     historia.append(
         Paragraph(
             f"PRODUCTOS REGISTRADOS · {len(registros)} en total",

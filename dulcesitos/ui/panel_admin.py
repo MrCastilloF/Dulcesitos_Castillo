@@ -8,6 +8,8 @@ from datetime import timedelta
 from tkinter import ttk
 from typing import Any
 
+from ..archivo_maestro import ErrorArchivoMaestro
+from ..catalogo import ErrorCatalogo, ServicioCatalogo, VistaProducto
 from ..modelos import (
     Administrador,
     CodigoAcceso,
@@ -36,6 +38,7 @@ from .componentes import (
     Campo,
     DialogoBase,
     MarcaCandy,
+    MarcoDesplazable,
     SelectorSegmentado,
     TablaDatos,
     Tarjeta,
@@ -448,6 +451,7 @@ class PanelAdministracion(tk.Toplevel):
         for clave, icono, texto in [
             ("accesos", "◇", "Accesos"),
             ("operadores", "◎", "Operadores"),
+            ("catalogo", "▦", "Catálogo"),
             ("lector", "⌁", "Lector"),
             ("historial", "▤", "Historial"),
         ]:
@@ -506,6 +510,8 @@ class PanelAdministracion(tk.Toplevel):
                 self._seccion_accesos()
             elif seccion == "operadores":
                 self._seccion_operadores()
+            elif seccion == "catalogo":
+                self._seccion_catalogo()
             elif seccion == "lector":
                 self._seccion_lector()
             elif seccion == "historial":
@@ -1225,6 +1231,423 @@ class PanelAdministracion(tk.Toplevel):
         self._actualizar_estado_lector_admin_pintar()
 
     # ------------------------------------------------------------------
+    # Sección: catálogo (altas y bajas locales)
+    # ------------------------------------------------------------------
+    def _seccion_catalogo(self) -> None:
+        try:
+            maestro = self.app.cargar_maestro_para_administracion()
+        except ErrorArchivoMaestro as exc:
+            self._catalogo_maestro = None
+            self._catalogo_vista = []
+            header = tk.Frame(self.area, bg=tema.FONDO)
+            header.pack(fill="x")
+            cabecera_seccion(
+                header,
+                "Altas y bajas",
+                "Catálogo de productos",
+                "No se pudo leer el archivo maestro actual.",
+            ).pack(side="left", fill="x", expand=True)
+            boton = Boton(
+                header,
+                "Abrir carpeta maestra",
+                lambda: self._abrir_carpeta(self.app.rutas.maestra),
+                variante="secundario",
+                ancho=190,
+                alto=38,
+                fondo=tema.FONDO,
+                takefocus=False,
+            )
+            boton.pack(side="right", anchor="n", pady=(3, 0))
+            tarjeta = Tarjeta(self.area, padding=18)
+            tarjeta.pack(fill="both", expand=True, pady=(14, 0))
+            etiqueta(
+                tarjeta.contenido,
+                "Archivo maestro no disponible",
+                fuente=tema_fuente_cuerpo_fuerte(tarjeta.contenido),
+                color=tema.ROJO,
+                fondo=tema.SUPERFICIE,
+            ).pack(anchor="w")
+            etiqueta(
+                tarjeta.contenido,
+                str(exc),
+                fuente=tema_fuente_pequena(tarjeta.contenido),
+                color=tema.TEXTO_SUAVE,
+                fondo=tema.SUPERFICIE,
+                wraplength=800,
+                justify="left",
+            ).pack(anchor="w", pady=(8, 0))
+            return
+
+        self._catalogo_maestro = maestro
+        self._catalogo_vista = self.app.catalogo.vista(maestro)
+        resumen = self.app.catalogo.resumen(maestro)
+
+        header = tk.Frame(self.area, bg=tema.FONDO)
+        header.pack(fill="x")
+        cabecera_seccion(
+            header,
+            "Altas y bajas locales",
+            "Catálogo de productos",
+            "El archivo maestro no se modifica. Los ajustes aplican a las próximas sesiones.",
+        ).pack(side="left", fill="x", expand=True)
+        Boton(
+            header,
+            "Nuevo producto",
+            self._abrir_nuevo_producto,
+            variante="caramelo",
+            icono="+",
+            ancho=164,
+            alto=40,
+            fondo=tema.FONDO,
+        ).pack(side="right", anchor="n", pady=(3, 0))
+
+        metricas = tk.Frame(self.area, bg=tema.FONDO)
+        metricas.pack(fill="x", pady=(11, 9))
+        for i in range(4):
+            metricas.grid_columnconfigure(i, weight=1, uniform="cat_metricas")
+        for i, (titulo, valor, color) in enumerate(
+            [
+                ("Productos activos", resumen.activos, tema.VERDE),
+                ("Nuevos locales", resumen.nuevos, tema.AZUL),
+                ("Dados de baja", resumen.bajas, tema.ROJO),
+                ("Ajustes guardados", resumen.ajustes, tema.CARAMELO),
+            ]
+        ):
+            tarjeta = TarjetaMetrica(metricas, titulo, valor, color=color, compacta=True)
+            tarjeta.grid(
+                row=0,
+                column=i,
+                sticky="ew",
+                padx=(0 if i == 0 else 5, 0 if i == 3 else 5),
+            )
+
+        tarjeta = Tarjeta(self.area, padding=13)
+        tarjeta.pack(fill="both", expand=True)
+        contenido = tarjeta.contenido
+        fila_busqueda = tk.Frame(contenido, bg=tema.SUPERFICIE)
+        fila_busqueda.pack(fill="x", pady=(0, 8))
+        busqueda = tk.Frame(fila_busqueda, bg=tema.SUPERFICIE)
+        busqueda.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        etiqueta(
+            busqueda,
+            "BUSCAR POR CÓDIGO O DESCRIPCIÓN",
+            fuente=tema_fuente_micro(busqueda),
+            color=tema.MUTED,
+            fondo=tema.SUPERFICIE,
+        ).pack(anchor="w", pady=(0, 5))
+        self._busqueda_catalogo = tk.StringVar()
+        caja = tk.Frame(
+            busqueda,
+            bg=tema.SUPERFICIE_2,
+            highlightbackground=tema.BORDE,
+            highlightthickness=1,
+        )
+        caja.pack(fill="x")
+        self._entrada_busqueda_catalogo = tk.Entry(
+            caja,
+            textvariable=self._busqueda_catalogo,
+            bg=tema.SUPERFICIE_2,
+            fg=tema.TEXTO,
+            insertbackground=tema.CARAMELO,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=tema_fuente_cuerpo(caja),
+        )
+        self._entrada_busqueda_catalogo.pack(fill="x", padx=10, pady=8)
+        self._entrada_busqueda_catalogo.bind(
+            "<Return>", lambda _e: self._cargar_tabla_catalogo()
+        )
+        Boton(
+            fila_busqueda,
+            "Buscar",
+            self._cargar_tabla_catalogo,
+            variante="secundario",
+            ancho=104,
+            alto=36,
+            fuente=tema_fuente_pequena(fila_busqueda),
+            fondo=tema.SUPERFICIE,
+        ).pack(side="left", anchor="s", pady=(0, 1))
+        Boton(
+            fila_busqueda,
+            "Limpiar",
+            self._limpiar_busqueda_catalogo,
+            variante="fantasma",
+            ancho=88,
+            alto=36,
+            fuente=tema_fuente_pequena(fila_busqueda),
+            fondo=tema.SUPERFICIE,
+            takefocus=False,
+        ).pack(side="left", anchor="s", padx=(4, 0), pady=(0, 1))
+
+        cabecera = encabezado_tarjeta(
+            contenido,
+            "Productos del catálogo efectivo",
+            "Incluye el maestro y los productos locales activos; permite reactivar las bajas.",
+            fondo=tema.SUPERFICIE,
+            derecha_texto="0 PRODUCTOS",
+            derecha_estado="neutro",
+        )
+        cabecera.pack(fill="x", pady=(0, 8))
+        self._pildora_catalogo = cabecera.pildora_derecha
+
+        self.tabla_catalogo = TablaDatos(
+            contenido,
+            [
+                ("codigo", "Código", 145, "w"),
+                ("descripcion", "Descripción", 320, "w"),
+                ("estado", "Estado", 112, "center"),
+                ("origen", "Origen", 84, "center"),
+                ("actualizado", "Actualizado", 140, "w"),
+            ],
+            alto=7,
+            fondo=tema.SUPERFICIE,
+            mensaje_vacio="No hay productos para mostrar.",
+            al_seleccionar=self._seleccionar_catalogo,
+        )
+        self.tabla_catalogo.aplicar_etiquetas(
+            {
+                "activo": {"foreground": tema.TEXTO},
+                "nuevo": {"foreground": tema.AZUL},
+                "inactivo": {"foreground": tema.ROJO},
+            }
+        )
+
+        acciones = tk.Frame(contenido, bg=tema.SUPERFICIE)
+        self.boton_baja_catalogo = Boton(
+            acciones,
+            "Dar de baja",
+            self._dar_de_baja_catalogo,
+            variante="peligro",
+            ancho=132,
+            alto=35,
+            fuente=tema_fuente_pequena(acciones),
+            fondo=tema.SUPERFICIE,
+        )
+        self.boton_baja_catalogo.pack(side="left")
+        self.boton_baja_catalogo.configurar_estado("deshabilitado")
+        self.boton_reactivar_catalogo = Boton(
+            acciones,
+            "Reactivar producto",
+            self._reactivar_catalogo,
+            variante="secundario",
+            ancho=166,
+            alto=35,
+            fuente=tema_fuente_pequena(acciones),
+            fondo=tema.SUPERFICIE,
+        )
+        self.boton_reactivar_catalogo.pack(side="left", padx=(8, 0))
+        self.boton_reactivar_catalogo.configurar_estado("deshabilitado")
+        self.lbl_info_catalogo = etiqueta(
+            acciones,
+            "",
+            fuente=tema_fuente_micro(acciones),
+            color=tema.MUTED,
+            fondo=tema.SUPERFICIE,
+            wraplength=500,
+            justify="left",
+        )
+        self.lbl_info_catalogo.pack(side="left", padx=(12, 0))
+        Boton(
+            acciones,
+            "Abrir carpeta maestra",
+            lambda: self._abrir_carpeta(self.app.rutas.maestra),
+            variante="fantasma",
+            ancho=166,
+            alto=34,
+            fuente=tema_fuente_pequena(acciones),
+            fondo=tema.SUPERFICIE,
+            takefocus=False,
+        ).pack(side="right")
+        nota = etiqueta(
+            contenido,
+            "Una baja impide registrar el producto en sesiones nuevas, pero conserva "
+            "todo el historial. El archivo original no se toca.",
+            fuente=tema_fuente_micro(contenido),
+            color=tema.MUTED,
+            fondo=tema.SUPERFICIE,
+            wraplength=900,
+            justify="left",
+        )
+        # Se reserva primero el pie y luego se asigna al tabla el espacio
+        # restante. Evita que el Treeview se dibuje debajo de los botones.
+        nota.pack(side="bottom", fill="x", pady=(8, 0))
+        acciones.pack(side="bottom", fill="x", pady=(10, 0))
+        self.tabla_catalogo.pack(fill="x")
+        self._cargar_tabla_catalogo()
+
+    def _limpiar_busqueda_catalogo(self) -> None:
+        self._busqueda_catalogo.set("")
+        self._cargar_tabla_catalogo()
+
+    def _cargar_tabla_catalogo(self) -> None:
+        if not getattr(self, "tabla_catalogo", None):
+            return
+        consulta = self._busqueda_catalogo.get().strip()
+        if self._catalogo_maestro is None:
+            return
+        vista = self.app.catalogo.buscar(self._catalogo_maestro, consulta)
+        self._vista_filtrada_catalogo = vista[:500]
+        filas: list[dict[str, Any]] = []
+        self._productos_catalogo_filas: dict[str, VistaProducto] = {}
+        for producto in self._vista_filtrada_catalogo:
+            if producto.estado == "inactivo":
+                estado = "Dado de baja"
+                tag = "inactivo"
+            elif producto.estado == "nuevo":
+                estado = "Nuevo local"
+                tag = "nuevo"
+            else:
+                estado = "Activo"
+                tag = "activo"
+            fila_id = producto.codigo_clave
+            self._productos_catalogo_filas[fila_id] = producto
+            filas.append(
+                {
+                    "_id": fila_id,
+                    "codigo": producto.codigo,
+                    "descripcion": truncar(producto.descripcion, 55),
+                    "estado": estado,
+                    "origen": "Local" if producto.origen == "local" else "Maestro",
+                    "actualizado": formatear_fecha_hora(producto.actualizado_en)
+                    if producto.actualizado_en
+                    else "—",
+                    "_tags": (tag,),
+                }
+            )
+        self.tabla_catalogo.cargar(filas)
+        total = len(self.app.catalogo.buscar(self._catalogo_maestro, consulta))
+        self._pildora_catalogo.actualizar(
+            f"{total} PRODUCTO" + ("" if total == 1 else "S"),
+            "neutro",
+        )
+        if total > len(filas):
+            self.lbl_info_catalogo.configure(
+                text=f"Mostrando {len(filas)} de {total}. Afina la búsqueda."
+            )
+        else:
+            self.lbl_info_catalogo.configure(
+                text="Selecciona un producto para dar de baja o reactivar."
+            )
+        self._seleccionar_catalogo(self.tabla_catalogo.seleccion())
+        if consulta:
+            self._entrada_busqueda_catalogo.icursor("end")
+
+    def _seleccionar_catalogo(self, fila: Any) -> None:
+        if not hasattr(self, "boton_baja_catalogo"):
+            return
+        producto = None
+        if fila:
+            producto = self._productos_catalogo_filas.get(fila.get("_id"))
+        if producto is None:
+            self.boton_baja_catalogo.configurar_estado("deshabilitado")
+            self.boton_reactivar_catalogo.configurar_estado("deshabilitado")
+            return
+        activo = producto.estado != "inactivo"
+        self.boton_baja_catalogo.configurar_estado("normal" if activo else "deshabilitado")
+        self.boton_reactivar_catalogo.configurar_estado(
+            "normal" if not activo else "deshabilitado"
+        )
+
+    def _abrir_nuevo_producto(self) -> None:
+        if self._catalogo_maestro is None or self.admin is None:
+            return
+        dialogo = DialogoNuevoProductoCatalogo(
+            self,
+            servicio=self.app.catalogo,
+            admin=self.admin,
+            maestro=self._catalogo_maestro,
+        )
+        dialogo.mostrar()
+        self.wait_window(dialogo)
+        creado = dialogo.resultado
+        if creado is None:
+            return
+        mensaje = self.app.catalogo_actualizado_por_admin()
+        self._mostrar_seccion("catalogo")
+        self.mostrar_aviso_panel(
+            f"Producto «{creado.descripcion}» agregado al catálogo local. {mensaje}",
+            "ok",
+        )
+
+    def _dar_de_baja_catalogo(self) -> None:
+        if not hasattr(self, "tabla_catalogo") or self.admin is None:
+            return
+        fila = self.tabla_catalogo.seleccion()
+        producto = self._productos_catalogo_filas.get(fila.get("_id")) if fila else None
+        if producto is None or producto.estado == "inactivo":
+            return
+        dialogo = DialogoBajaProducto(self, producto=producto, admin=self.admin)
+        dialogo.mostrar()
+        self.wait_window(dialogo)
+        motivo = dialogo.resultado
+        if motivo is None:
+            return
+        try:
+            self.app.catalogo.dar_de_baja(
+                admin=self.admin,
+                maestro=self._catalogo_maestro,
+                codigo=producto.codigo,
+                motivo=motivo,
+            )
+        except ErrorCatalogo as exc:
+            DialogoMensaje.aviso(
+                self,
+                titulo="No se pudo dar de baja",
+                mensaje=str(exc),
+                estado="error",
+            )
+            return
+        self.sonidos.advertencia()
+        mensaje = self.app.catalogo_actualizado_por_admin()
+        self._mostrar_seccion("catalogo")
+        self.mostrar_aviso_panel(
+            f"Producto «{producto.descripcion}» dado de baja. {mensaje}",
+            "ok",
+        )
+
+    def _reactivar_catalogo(self) -> None:
+        if not hasattr(self, "tabla_catalogo") or self.admin is None:
+            return
+        fila = self.tabla_catalogo.seleccion()
+        producto = self._productos_catalogo_filas.get(fila.get("_id")) if fila else None
+        if producto is None or producto.estado != "inactivo":
+            return
+        if not DialogoMensaje.preguntar(
+            self,
+            titulo="Reactivar producto",
+            mensaje=(
+                f"«{producto.descripcion}» volverá a estar disponible para "
+                "las próximas sesiones de inventario. ¿Deseas reactivarlo?"
+            ),
+            estado="info",
+            texto_aceptar="Reactivar",
+            texto_cancelar="Cancelar",
+        ):
+            return
+        try:
+            self.app.catalogo.reactivar(
+                admin=self.admin,
+                maestro=self._catalogo_maestro,
+                codigo=producto.codigo,
+            )
+        except ErrorCatalogo as exc:
+            DialogoMensaje.aviso(
+                self,
+                titulo="No se pudo reactivar",
+                mensaje=str(exc),
+                estado="error",
+            )
+            return
+        self.sonidos.exito()
+        mensaje = self.app.catalogo_actualizado_por_admin()
+        self._mostrar_seccion("catalogo")
+        self.mostrar_aviso_panel(
+            f"Producto «{producto.descripcion}» reactivado. {mensaje}",
+            "ok",
+        )
+
+    # ------------------------------------------------------------------
     # Sección: historial
     # ------------------------------------------------------------------
     def _seccion_historial(self) -> None:
@@ -1754,6 +2177,225 @@ class DialogoGenerarCodigo(DialogoBase):
             self.boton_generar.configurar_texto("Generar código seguro", icono="+")
             return
         self.resultado = emitido
+        self.cerrar()
+
+
+class DialogoNuevoProductoCatalogo(DialogoBase):
+    """Alta local con todas las columnas del catálogo maestro."""
+
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        servicio: ServicioCatalogo,
+        admin: Administrador,
+        maestro,
+    ):
+        super().__init__(padre, "Nuevo producto", ancho=760, alto=690)
+        self.servicio = servicio
+        self.admin = admin
+        self.maestro = maestro
+        self.resultado = None
+        _cabecera(
+            self.tenedor,
+            "Agregar un producto local",
+            "Se guardará en la base local y se sumará al catálogo de las próximas sesiones.",
+            "ALTAS DE CATÁLOGO",
+        )
+        separador(self.tenedor, tema.BORDE, 1).pack(fill="x")
+
+        pie = tk.Frame(self.tenedor, bg=tema.FONDO)
+        pie.pack(fill="x", side="bottom", padx=24, pady=(8, 18))
+        self.boton_guardar = Boton(
+            pie,
+            "Guardar producto",
+            self._guardar,
+            variante="caramelo",
+            icono="+",
+            ancho=210,
+            alto=44,
+            fondo=tema.FONDO,
+        )
+        self.boton_guardar.pack(side="right")
+        Boton(
+            pie,
+            "Cancelar",
+            self.cerrar,
+            variante="fantasma",
+            ancho=112,
+            alto=40,
+            fondo=tema.FONDO,
+        ).pack(side="right", padx=(0, 8))
+
+        self.banner = BannerEstado(self.tenedor, fondo=tema.FONDO)
+        self._banner_visible = False
+
+        self.scroll = MarcoDesplazable(
+            self.tenedor, fondo=tema.FONDO, expandir_alto=True
+        )
+        self.scroll.pack(fill="both", expand=True, padx=24, pady=(0, 0))
+        interior = tk.Frame(self.scroll.interior, bg=tema.FONDO)
+        interior.pack(fill="x", padx=3, pady=(8, 6))
+        etiqueta(
+            interior,
+            "El código y la descripción son obligatorios. Los demás campos "
+            "se pueden completar ahora o dejar vacíos.",
+            fuente=tema_fuente_pequena(interior),
+            color=tema.MUTED,
+            fondo=tema.FONDO,
+            wraplength=680,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.campos: dict[str, Campo] = {}
+        for columna in maestro.columnas:
+            obligatorio = columna in {
+                maestro.columna_codigo,
+                maestro.columna_descripcion,
+            }
+            campo = Campo(
+                interior,
+                columna,
+                ayuda="Obligatorio." if obligatorio else "Opcional.",
+                fondo=tema.FONDO,
+                fuente=tema_fuente_cuerpo(interior),
+            )
+            campo.pack(fill="x", pady=(0, 8))
+            self.campos[columna] = campo
+        self.after(120, lambda: self.campos[maestro.columna_codigo].enfocar())
+
+    def _mostrar_error(self, mensaje: str) -> None:
+        self.banner.mostrar("No se pudo guardar el producto", mensaje, "error")
+        if not self._banner_visible:
+            self.banner.pack(
+                fill="x",
+                padx=24,
+                pady=(8, 4),
+                before=self.scroll,
+            )
+            self._banner_visible = True
+        self.scroll.ir_al_inicio()
+
+    def _guardar(self) -> None:
+        datos = {columna: campo.get().strip() for columna, campo in self.campos.items()}
+        codigo = datos.get(self.maestro.columna_codigo, "")
+        descripcion = datos.get(self.maestro.columna_descripcion, "")
+        self.boton_guardar.configurar_estado("deshabilitado")
+        self.boton_guardar.configurar_texto("Guardando…")
+        self.update_idletasks()
+        try:
+            registro = self.servicio.crear_producto(
+                admin=self.admin,
+                maestro=self.maestro,
+                codigo=codigo,
+                descripcion=descripcion,
+                campos=datos,
+            )
+        except ErrorCatalogo as exc:
+            self.boton_guardar.configurar_estado("normal")
+            self.boton_guardar.configurar_texto("Guardar producto", icono="+")
+            self._mostrar_error(str(exc))
+            return
+        except Exception as exc:
+            LOG.exception("Error creando producto local")
+            self.boton_guardar.configurar_estado("normal")
+            self.boton_guardar.configurar_texto("Guardar producto", icono="+")
+            self._mostrar_error(f"Error inesperado: {exc}")
+            return
+        self.resultado = registro
+        self.cerrar()
+
+
+class DialogoBajaProducto(DialogoBase):
+    def __init__(
+        self,
+        padre: tk.Misc,
+        *,
+        producto: VistaProducto,
+        admin: Administrador,
+    ):
+        super().__init__(padre, "Dar de baja un producto", ancho=600, alto=530)
+        self.producto = producto
+        self.admin = admin
+        self.resultado: str | None = None
+        _cabecera(
+            self.tenedor,
+            "Dar de baja del catálogo",
+            "El producto dejará de estar disponible en las próximas sesiones.",
+            "BAJA DE PRODUCTO",
+        )
+        separador(self.tenedor, tema.BORDE, 1).pack(fill="x")
+        cuerpo = tk.Frame(self.tenedor, bg=tema.FONDO)
+        cuerpo.pack(fill="both", expand=True, padx=26, pady=18)
+        ficha = tk.Frame(
+            cuerpo,
+            bg=tema.SUPERFICIE_2,
+            highlightbackground=tema.BORDE,
+            highlightthickness=1,
+        )
+        ficha.pack(fill="x")
+        etiqueta(
+            ficha,
+            producto.codigo,
+            fuente=tema_fuente_micro(ficha),
+            color=tema.CARAMELO_CLARO,
+            fondo=tema.SUPERFICIE_2,
+        ).pack(anchor="w", padx=13, pady=(10, 1))
+        etiqueta(
+            ficha,
+            producto.descripcion,
+            fuente=tema_fuente_cuerpo_fuerte(ficha),
+            color=tema.TEXTO,
+            fondo=tema.SUPERFICIE_2,
+            wraplength=500,
+            justify="left",
+        ).pack(anchor="w", padx=13, pady=(0, 10))
+        self.motivo = Campo(
+            cuerpo,
+            "Motivo de la baja (opcional)",
+            ayuda="Queda registrado en el ajuste local para auditoría.",
+            fondo=tema.FONDO,
+            fuente=tema_fuente_cuerpo(cuerpo),
+            on_enter=self._confirmar,
+        )
+        self.motivo.pack(fill="x", pady=(16, 0))
+        aviso = tk.Frame(cuerpo, bg=tema.ROJO_FONDO)
+        aviso.pack(fill="x", pady=(14, 0))
+        etiqueta(
+            aviso,
+            "El producto no se borra del archivo maestro ni de las sesiones "
+            "anteriores. Solo se oculta para los próximos registros y puede "
+            "reactivarse después.",
+            fuente=tema_fuente_micro(aviso),
+            color=tema.ROJO_CLARO,
+            fondo=tema.ROJO_FONDO,
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=9)
+        pie = tk.Frame(self.tenedor, bg=tema.FONDO)
+        pie.pack(fill="x", side="bottom", padx=26, pady=(0, 20))
+        Boton(
+            pie,
+            "Dar de baja",
+            self._confirmar,
+            variante="peligro",
+            ancho=150,
+            alto=42,
+            fondo=tema.FONDO,
+        ).pack(side="right")
+        Boton(
+            pie,
+            "Cancelar",
+            self.cerrar,
+            variante="fantasma",
+            ancho=112,
+            alto=40,
+            fondo=tema.FONDO,
+        ).pack(side="right", padx=(0, 8))
+        self.after(120, self.motivo.enfocar)
+
+    def _confirmar(self) -> None:
+        self.resultado = self.motivo.get().strip()
         self.cerrar()
 
 

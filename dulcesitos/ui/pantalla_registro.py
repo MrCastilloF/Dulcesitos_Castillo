@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from typing import Any
 
+from ..archivo_maestro import convertir_numero, formatear_cantidad
 from ..modelos import EstadoLector, RegistroSesion, ResultadoEscaneo
 from ..servicios import ErrorInventario
 from ..utilidades import (
@@ -26,8 +28,9 @@ from .componentes import (
     encabezado_tarjeta,
     etiqueta,
 )
-from .dialogos import DialogoMensaje
+from .dialogos import DialogoMensaje, DialogoRegistroManual
 from .pantalla_acceso import (
+    tema_fuente_cuerpo,
     tema_fuente_cuerpo_fuerte,
     tema_fuente_micro,
     tema_fuente_pequena,
@@ -47,10 +50,16 @@ class PantallaRegistro(tk.Frame):
         self._mensaje_inicial = mensaje_inicial
         self._estado_lector: EstadoLector = app.estado_lector
         self._ultimo_resultado: ResultadoEscaneo | None = None
+        self._registro_en_detalle: RegistroSesion | None = None
+        self._entrada_stock: tk.Entry | None = None
         self._filas: dict[str, RegistroSesion] = {}
         self._contador_filas = 0
         self._bind_f2: str | None = None
         self._after_foco: str | None = None
+        self._after_acceso: str | None = None
+        self._acceso_bloqueado = False
+        self._dialogo_manual_abierto = False
+        self._dialogo_manual = None
         self._construir()
         self._actualizar_lector_visual()
         self._refrescar_tabla_inicial()
@@ -68,6 +77,7 @@ class PantallaRegistro(tk.Frame):
         self._bind_f2 = self.winfo_toplevel().bind("<F2>", self._tecla_f2, add="+")
         self.bind("<Destroy>", self._al_destruir, add="+")
         self._programar_foco()
+        self._programar_verificacion_acceso()
 
     # ------------------------------------------------------------------
     # Construcción
@@ -200,6 +210,29 @@ class PantallaRegistro(tk.Frame):
             habilitado=True,
         )
         self.entrada.pack(fill="x", pady=(11, 9))
+        fila_manual = tk.Frame(contenido, bg=tema.SUPERFICIE)
+        fila_manual.pack(fill="x", pady=(0, 9))
+        self.boton_manual = Boton(
+            fila_manual,
+            "Registro manual",
+            self._abrir_registro_manual,
+            variante="secundario",
+            icono="⌨",
+            ancho=174,
+            alto=34,
+            fuente=tema_fuente_pequena(fila_manual),
+            fondo=tema.SUPERFICIE,
+        )
+        self.boton_manual.pack(side="left")
+        etiqueta(
+            fila_manual,
+            "Si el código no se lee o no aparece: pausa el lector y escribe la novedad.",
+            fuente=tema_fuente_micro(fila_manual),
+            color=tema.MUTED,
+            fondo=tema.SUPERFICIE,
+            wraplength=350,
+            justify="left",
+        ).pack(side="left", padx=(9, 0))
         self.banner = BannerEstado(contenido, fondo=tema.SUPERFICIE)
         self.banner.pack(fill="x")
         self.banner.mostrar(
@@ -225,20 +258,23 @@ class PantallaRegistro(tk.Frame):
         self.tabla = TablaDatos(
             contenido,
             [
-                ("codigo", "Código", 134, "w"),
-                ("descripcion", "Descripción", 330, "w"),
-                ("hora", "Hora", 82, "center"),
+                ("codigo", "Código", 132, "w"),
+                ("descripcion", "Descripción", 278, "w"),
+                ("origen", "Origen", 76, "center"),
+                ("hora", "Hora", 72, "center"),
             ],
             alto=5,
             fondo=tema.SUPERFICIE,
             mensaje_vacio="Aún no hay productos.\nEl primero que escanees aparecerá aquí.",
             autoseleccionar=False,
+            al_seleccionar=self._seleccionar_registro_tabla,
         )
         self.tabla.pack(fill="both", expand=True)
         self.tabla.aplicar_etiquetas(
             {
                 "impar": {"background": tema.SUPERFICIE},
                 "par": {"background": "#1A120F"},
+                "manual": {"foreground": tema.AMBAR_CLARO},
             }
         )
 
@@ -309,6 +345,8 @@ class PantallaRegistro(tk.Frame):
         for rotulo, valor in [
             ("CÉDULA", self.operador.cedula if self.operador else "—"),
             ("ARCHIVO", truncar(self.maestro.nombre if self.maestro else "—", 34)),
+            ("AJUSTES DE STOCK", "0"),
+            ("REGISTROS MANUALES", "0"),
         ]:
             fila = tk.Frame(info, bg=tema.SUPERFICIE)
             fila.pack(fill="x", pady=1)
@@ -319,13 +357,18 @@ class PantallaRegistro(tk.Frame):
                 color=tema.MUTED,
                 fondo=tema.SUPERFICIE,
             ).pack(side="left")
-            etiqueta(
+            valor_label = etiqueta(
                 fila,
                 valor,
                 fuente=tema_fuente_micro(fila),
                 color=tema.TEXTO_SUAVE,
                 fondo=tema.SUPERFICIE,
-            ).pack(side="right")
+            )
+            valor_label.pack(side="right")
+            if rotulo == "AJUSTES DE STOCK":
+                self.lbl_ajustes_stock = valor_label
+            elif rotulo == "REGISTROS MANUALES":
+                self.lbl_manuales = valor_label
 
         self.boton_deshacer = Boton(
             contenido,
@@ -370,8 +413,12 @@ class PantallaRegistro(tk.Frame):
     # Lector y datos
     # ------------------------------------------------------------------
     def _actualizar_lector_visual(self) -> None:
+        if self._dialogo_manual_abierto:
+            self.pildora_lector.actualizar("MODO MANUAL", "advertencia")
+            self.entrada.habilitar(False)
+            return
         estado = self._estado_lector
-        if estado.estado == "activo":
+        if estado.estado == "activo" and not self._acceso_bloqueado:
             self.pildora_lector.actualizar("LECTOR ACTIVO", "ok")
             self.entrada.habilitar(True)
             self.tarjeta_escaneo.configure(
@@ -418,19 +465,28 @@ class PantallaRegistro(tk.Frame):
         self.tabla.cargar(filas)
         if registros:
             self._ultimo_resultado = None
-            self._render_detalle(registros[0], "registrado", "Producto ya registrado")
+            primero = registros[0]
+            self._render_detalle(
+                primero,
+                "manual" if primero.es_manual else "registrado",
+                "MANUAL" if primero.es_manual else "Producto ya registrado",
+            )
         self._actualizar_boton_deshacer()
 
     def _fila_desde_registro(self, registro: RegistroSesion) -> dict[str, str]:
         self._contador_filas += 1
         clave = f"fila_{registro.id}_{self._contador_filas}"
         self._filas[clave] = registro
+        etiquetas = ["par" if self._contador_filas % 2 == 0 else "impar"]
+        if registro.es_manual:
+            etiquetas.append("manual")
         return {
             "_id": clave,
             "codigo": registro.codigo,
-            "descripcion": truncar(registro.descripcion, 58),
+            "descripcion": truncar(registro.descripcion, 48),
+            "origen": "Manual" if registro.es_manual else "Lector",
             "hora": formatear_hora(registro.escaneado_en),
-            "_tags": ("par" if self._contador_filas % 2 == 0 else "impar",),
+            "_tags": tuple(etiquetas),
         }
 
     def _insertar_registro_tabla(self, registro: RegistroSesion) -> None:
@@ -439,13 +495,99 @@ class PantallaRegistro(tk.Frame):
         self.tabla.insertar_inicio(fila, fila["_id"])
         self.tabla.arbol.see(fila["_id"])
 
+    def _seleccionar_registro_tabla(self, fila: Any) -> None:
+        if not fila:
+            return
+        base = self._filas.get(fila.get("_id"))
+        if base is None:
+            return
+        actual = self.app.inventario.db.obtener_registro_por_clave(
+            self.sesion.id, base.codigo_clave
+        )
+        if actual is None:
+            return
+        self._render_detalle(
+            actual,
+            "manual" if actual.es_manual else "registrado",
+            "MANUAL" if actual.es_manual else "REGISTRADO",
+        )
+
     # ------------------------------------------------------------------
-    # Escaneo
+    # Escaneo y registro manual
     # ------------------------------------------------------------------
+    def _abrir_registro_manual(self) -> None:
+        if self._dialogo_manual_abierto:
+            return
+        if (
+            self._acceso_bloqueado
+            or self.app.operador is None
+            or not self.app.auth.sesion_operador_vigente(self.app.operador)
+        ):
+            self._bloquear_por_acceso()
+            return
+        self._dialogo_manual_abierto = True
+        self.app.lector.pausar_captura()
+        self.entrada.habilitar(False)
+        self.pildora_lector.actualizar("MODO MANUAL", "advertencia")
+        self.boton_manual.configurar_estado("deshabilitado")
+        self.boton_manual.configurar_texto("Lector en pausa", icono="⌨")
+        dialogo = None
+        try:
+            dialogo = DialogoRegistroManual(
+                self,
+                servicio=self.app.inventario,
+                sesion=self.sesion,
+                maestro=self.maestro,
+                operador=self.app.operador,
+            )
+            self._dialogo_manual = dialogo
+            dialogo.mostrar()
+            self.wait_window(dialogo)
+            registro = dialogo.resultado
+        finally:
+            self._dialogo_manual = None
+            self._dialogo_manual_abierto = False
+            self.app.lector.reanudar_captura()
+            self.boton_manual.configurar_estado(
+                "deshabilitado" if self._acceso_bloqueado else "normal"
+            )
+            self.boton_manual.configurar_texto("Registro manual", icono="⌨")
+            self._actualizar_lector_visual()
+        if self._acceso_bloqueado:
+            return
+        if registro is not None:
+            self._insertar_registro_tabla(registro)
+            self._render_detalle(registro, "manual", "MANUAL")
+            self._actualizar_contadores()
+            self._mostrar_feedback(
+                "Registro manual guardado",
+                f"{registro.descripcion}. La novedad quedó guardada en la sesión "
+                "y saldrá en el archivo de actualización.",
+                "ok",
+            )
+            self.app.sonidos.exito()
+        else:
+            self._mostrar_feedback(
+                "Modo normal",
+                "El formulario se cerró y el lector vuelve a estar disponible. "
+                "No se creó ningún registro.",
+                "info",
+            )
+        self.after(120, self._enfocar_escaneo)
+
     def recibir_lectura_serial(self, codigo: str) -> None:
+        if self._dialogo_manual_abierto:
+            return
         self._procesar_codigo(codigo)
 
     def _procesar_codigo(self, codigo: str) -> None:
+        if (
+            self._acceso_bloqueado
+            or self.app.operador is None
+            or not self.app.auth.sesion_operador_vigente(self.app.operador)
+        ):
+            self._bloquear_por_acceso()
+            return
         codigo = codigo.strip()
         if not codigo:
             self._mostrar_feedback(
@@ -504,7 +646,10 @@ class PantallaRegistro(tk.Frame):
         elif resultado.estado == "duplicado":
             self.app.sonidos.advertencia()
             self._render_detalle(
-                None, "duplicado", "DUPLICADO", campos=resultado.campos
+                resultado.registro_existente,
+                "duplicado",
+                "DUPLICADO",
+                campos=resultado.campos,
             )
             self._mostrar_feedback(
                 "Lectura duplicada",
@@ -539,6 +684,10 @@ class PantallaRegistro(tk.Frame):
         self.metrica_no_encontrados.actualizar(estadisticas.no_encontrados)
         self.metrica_lecturas.actualizar(estadisticas.total_lecturas)
         self._actualizar_cobertura(estadisticas.registrados)
+        if hasattr(self, "lbl_ajustes_stock"):
+            self.lbl_ajustes_stock.configure(text=str(estadisticas.ajustes_stock))
+        if hasattr(self, "lbl_manuales"):
+            self.lbl_manuales.configure(text=str(estadisticas.manuales))
         self._actualizar_boton_final()
 
     def _actualizar_cobertura(self, registrados: int) -> None:
@@ -622,8 +771,14 @@ class PantallaRegistro(tk.Frame):
             hijo.destroy()
         self.pildora_detalle.actualizar(
             etiqueta_estado,
-            "ok" if estado == "registrado" else "advertencia" if estado == "duplicado" else "error",
+            "ok"
+            if estado in {"registrado", "manual"}
+            else "advertencia"
+            if estado == "duplicado"
+            else "error",
         )
+        self._registro_en_detalle = registro
+        self._entrada_stock = None
         if estado == "no_encontrado":
             self._render_no_encontrado(codigo)
             return
@@ -638,6 +793,30 @@ class PantallaRegistro(tk.Frame):
             if registro
             else datos.get(self.maestro.columna_codigo, codigo)
         )
+        if registro is not None and registro.es_manual:
+            nota_manual = tk.Frame(
+                self.cuerpo_detalle,
+                bg=tema.AMBAR_FONDO,
+                highlightbackground="#6B4B0B",
+                highlightthickness=1,
+            )
+            nota_manual.pack(fill="x", pady=(0, 8))
+            etiqueta(
+                nota_manual,
+                "REGISTRO MANUAL · NOVEDAD",
+                fuente=tema_fuente_micro(nota_manual),
+                color=tema.AMBAR_CLARO,
+                fondo=tema.AMBAR_FONDO,
+            ).pack(anchor="w", padx=9, pady=(6, 1))
+            etiqueta(
+                nota_manual,
+                registro.novedad or "Sin novedad escrita.",
+                fuente=tema_fuente_micro(nota_manual),
+                color=tema.TEXTO_SUAVE,
+                fondo=tema.AMBAR_FONDO,
+                wraplength=430,
+                justify="left",
+            ).pack(anchor="w", padx=9, pady=(0, 6))
         etiqueta(
             self.cuerpo_detalle,
             descripcion,
@@ -687,6 +866,7 @@ class PantallaRegistro(tk.Frame):
             if columna in {
                 self.maestro.columna_codigo,
                 self.maestro.columna_descripcion,
+                self.maestro.columna_stock,
             }:
                 continue
             if valor:
@@ -727,6 +907,179 @@ class PantallaRegistro(tk.Frame):
                 color=tema.MUTED,
                 fondo=tema.SUPERFICIE,
             ).pack(anchor="w", pady=(2, 0))
+        if registro is not None:
+            self._render_editor_stock(registro, datos)
+
+    def _render_editor_stock(
+        self, registro: RegistroSesion, datos: dict[str, str]
+    ) -> None:
+        columna = self.maestro.columna_stock
+        if not columna:
+            return
+        original = registro.stock_original
+        if original is None:
+            original = convertir_numero(datos.get(columna, ""))
+        nuevo = registro.stock_nuevo
+        caja = tk.Frame(
+            self.cuerpo_detalle,
+            bg=tema.AZUL_FONDO,
+            highlightbackground="#1E4B77",
+            highlightthickness=1,
+        )
+        caja.pack(fill="x", pady=(11, 0))
+        cabecera = tk.Frame(caja, bg=tema.AZUL_FONDO)
+        cabecera.pack(fill="x", padx=10, pady=(7, 3))
+        etiqueta(
+            cabecera,
+            "AJUSTAR STOCK CONTADO",
+            fuente=tema_fuente_micro(cabecera),
+            color=tema.AZUL_CLARO,
+            fondo=tema.AZUL_FONDO,
+        ).pack(side="left")
+        etiqueta(
+            cabecera,
+            f"Catálogo: {formatear_cantidad(original) or '—'}",
+            fuente=tema_fuente_micro(cabecera),
+            color=tema.TEXTO_SUAVE,
+            fondo=tema.AZUL_FONDO,
+        ).pack(side="right")
+        fila = tk.Frame(caja, bg=tema.AZUL_FONDO)
+        fila.pack(fill="x", padx=10, pady=(0, 8))
+        variable = tk.StringVar(
+            value=formatear_cantidad(nuevo if nuevo is not None else original)
+        )
+        self._variable_stock = variable
+        entrada = tk.Entry(
+            fila,
+            textvariable=variable,
+            bg=tema.SUPERFICIE_2,
+            fg=tema.TEXTO,
+            insertbackground=tema.CARAMELO,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=tema.BORDE,
+            highlightcolor=tema.CARAMELO,
+            font=tema_fuente_cuerpo(fila),
+            width=10,
+            justify="right",
+        )
+        entrada.pack(side="left", ipady=7)
+        entrada.bind("<Return>", lambda _e: self._guardar_stock(registro))
+        self._entrada_stock = entrada
+        Boton(
+            fila,
+            "Guardar stock",
+            lambda: self._guardar_stock(registro),
+            variante="primario",
+            icono="✓",
+            ancho=152,
+            alto=34,
+            fuente=tema_fuente_pequena(fila),
+            fondo=tema.AZUL_FONDO,
+            takefocus=False,
+        ).pack(side="right")
+        if nuevo is not None:
+            Boton(
+                fila,
+                "Quitar ajuste",
+                lambda: self._quitar_stock(registro),
+                variante="fantasma",
+                ancho=120,
+                alto=32,
+                fuente=tema_fuente_micro(fila),
+                fondo=tema.AZUL_FONDO,
+                takefocus=False,
+            ).pack(side="right", padx=(0, 6))
+        if nuevo is not None:
+            diferencia = registro.stock_diferencia
+            signo = "+" if diferencia is not None and diferencia > 0 else ""
+            etiqueta(
+                caja,
+                "Ajuste guardado: "
+                f"{formatear_cantidad(nuevo)}"
+                + (
+                    f" ({signo}{formatear_cantidad(diferencia)} frente al catálogo)"
+                    if diferencia is not None
+                    else ""
+                ),
+                fuente=tema_fuente_micro(caja),
+                color=tema.VERDE_CLARO,
+                fondo=tema.AZUL_FONDO,
+                wraplength=430,
+                justify="left",
+            ).pack(anchor="w", padx=10, pady=(0, 7))
+        else:
+            etiqueta(
+                caja,
+                "Opcional: escribe el conteo físico y guárdalo. Si no ajustas, "
+                "se conserva el stock del catálogo.",
+                fuente=tema_fuente_micro(caja),
+                color=tema.MUTED,
+                fondo=tema.AZUL_FONDO,
+                wraplength=430,
+                justify="left",
+            ).pack(anchor="w", padx=10, pady=(0, 7))
+
+    def _guardar_stock(self, registro: RegistroSesion) -> None:
+        if (
+            self._acceso_bloqueado
+            or self.app.operador is None
+            or not self.app.auth.sesion_operador_vigente(self.app.operador)
+        ):
+            self._bloquear_por_acceso()
+            return
+        texto = self._variable_stock.get().strip()
+        nuevo = convertir_numero(texto)
+        if nuevo is None:
+            self._mostrar_feedback(
+                "Stock inválido",
+                "Escribe una cantidad numérica para el stock contado.",
+                "error",
+            )
+            self.app.sonidos.error()
+            self._entrada_stock.focus_set()
+            return
+        try:
+            actualizado = self.app.inventario.ajustar_stock(
+                sesion=self.sesion,
+                maestro=self.maestro,
+                registro=registro,
+                stock_nuevo=nuevo,
+                operador=self.app.operador,
+            )
+        except ErrorInventario as exc:
+            self._mostrar_feedback("No se pudo ajustar el stock", str(exc), "error")
+            self.app.sonidos.error()
+            return
+        self.app.sonidos.exito()
+        self._render_detalle(actualizado, "registrado", "REGISTRADO")
+        self._actualizar_contadores()
+        self._mostrar_feedback(
+            "Stock ajustado",
+            f"{actualizado.descripcion}: stock contado "
+            f"{formatear_cantidad(actualizado.stock_nuevo)}. "
+            "El valor se aplicará en el archivo de actualización.",
+            "ok",
+        )
+        self.after(100, self._enfocar_escaneo)
+
+    def _quitar_stock(self, registro: RegistroSesion) -> None:
+        try:
+            actualizado = self.app.inventario.quitar_ajuste_stock(
+                sesion=self.sesion, registro=registro
+            )
+        except ErrorInventario as exc:
+            self._mostrar_feedback("No se pudo quitar el ajuste", str(exc), "error")
+            return
+        self._render_detalle(actualizado, "registrado", "REGISTRADO")
+        self._actualizar_contadores()
+        self._mostrar_feedback(
+            "Ajuste retirado",
+            "El producto conservará el stock del catálogo en el archivo de salida.",
+            "advertencia",
+        )
+        self.after(100, self._enfocar_escaneo)
 
     def _render_no_encontrado(self, codigo: str) -> None:
         self.pildora_detalle.actualizar("NO ENCONTRADO", "error")
@@ -834,8 +1187,61 @@ class PantallaRegistro(tk.Frame):
     # ------------------------------------------------------------------
     # Foco y teclado
     # ------------------------------------------------------------------
+    def _programar_verificacion_acceso(self) -> None:
+        try:
+            self._after_acceso = self.after(7000, self._verificar_acceso)
+        except tk.TclError:
+            self._after_acceso = None
+
+    def _verificar_acceso(self) -> None:
+        try:
+            if not self.winfo_exists() or self.app._pantalla_actual is not self:
+                return
+            if (
+                not self._acceso_bloqueado
+                and (
+                    self.app.operador is None
+                    or not self.app.auth.sesion_operador_vigente(self.app.operador)
+                )
+            ):
+                self._bloquear_por_acceso()
+        except tk.TclError:
+            return
+        finally:
+            self._programar_verificacion_acceso()
+
+    def _bloquear_por_acceso(self) -> None:
+        if self._acceso_bloqueado:
+            return
+        self._acceso_bloqueado = True
+        self.entrada.habilitar(False)
+        self.entrada.configurar_texto_deshabilitado(
+            "Acceso vencido o revocado. Solo puedes finalizar con autorización de administración."
+        )
+        if hasattr(self, "boton_manual"):
+            self.boton_manual.configurar_estado("deshabilitado")
+        if self._dialogo_manual is not None:
+            try:
+                self._dialogo_manual.cerrar()
+            except tk.TclError:
+                pass
+            self._dialogo_manual = None
+        self.pildora_sesion.actualizar("ACCESO BLOQUEADO", "error")
+        self._mostrar_feedback(
+            "Acceso bloqueado",
+            "Tu código de acceso venció o fue revocado. No se pueden registrar "
+            "más productos. Los registros están guardados; un administrador puede "
+            "renovarte el acceso y autorizar el cierre de esta sesión.",
+            "error",
+        )
+        self.app.sonidos.error()
+
     def _enfocar_escaneo(self) -> None:
-        if self.entrada._habilitado and self.app.grab_current() is None:
+        if (
+            self.entrada._habilitado
+            and not self._acceso_bloqueado
+            and self.app.grab_current() is None
+        ):
             self.entrada.enfocar()
 
     def _programar_foco(self) -> None:
@@ -848,7 +1254,11 @@ class PantallaRegistro(tk.Frame):
         try:
             if not self.winfo_exists() or self.app._pantalla_actual is not self:
                 return
-            if self.app.grab_current() is not None or not self.app.winfo_viewable():
+            if (
+                self.app.grab_current() is not None
+                or not self.app.winfo_viewable()
+                or self._acceso_bloqueado
+            ):
                 return
             actual = self.focus_get()
             if actual is None or actual is self.entrada.entrada:
@@ -883,3 +1293,15 @@ class PantallaRegistro(tk.Frame):
             except tk.TclError:
                 pass
             self._after_foco = None
+        if self._after_acceso:
+            try:
+                self.after_cancel(self._after_acceso)
+            except tk.TclError:
+                pass
+            self._after_acceso = None
+        if self._dialogo_manual_abierto:
+            try:
+                self.app.lector.reanudar_captura()
+            except Exception:
+                pass
+            self._dialogo_manual_abierto = False

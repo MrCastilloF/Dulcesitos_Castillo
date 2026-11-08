@@ -236,6 +236,7 @@ class ServicioLector:
         self._ultima_deteccion = 0.0
         self._ultima_publicacion = 0.0
         self._activo = False
+        self._captura_pausada = False
         self._validado_por_lectura = False
         self._desconexion_detectada = False
         self._ultima_lectura: datetime | None = None
@@ -263,6 +264,26 @@ class ServicioLector:
         if hilo and hilo.is_alive():
             hilo.join(timeout=2.0)
         self._hilo = None
+
+    def pausar_captura(self) -> None:
+        """Ignora lecturas del puerto serie mientras se usa el modo manual.
+
+        En HID el lector se comporta como teclado; la interfaz desvía el foco a
+        los campos manuales para que la digitación no se interprete como
+        escaneo. En serie se descartan los eventos entrantes.
+        """
+
+        with self._lock:
+            self._captura_pausada = True
+
+    def reanudar_captura(self) -> None:
+        with self._lock:
+            self._captura_pausada = False
+
+    @property
+    def captura_pausada(self) -> bool:
+        with self._lock:
+            return self._captura_pausada
 
     def estado_actual(self) -> EstadoLector:
         with self._lock:
@@ -631,6 +652,9 @@ class ServicioLector:
         if not codigo:
             return
         with self._lock:
+            if self._captura_pausada:
+                LOG.debug("Lectura serie ignorada: modo manual activo")
+                return
             self._ultima_lectura = ahora_utc()
             self._validado_por_lectura = True
         try:

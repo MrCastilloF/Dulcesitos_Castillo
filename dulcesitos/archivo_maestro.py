@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import cached_property
 from pathlib import Path
@@ -115,6 +115,69 @@ _COLUMNAS_SISTEMA = {
     "id sesion",
     "resultado",
 }
+
+_COLUMNAS_STOCK = {
+    "stock",
+    "stock actual",
+    "stock disponible",
+    "cantidad",
+    "cantidad actual",
+    "existencia",
+    "existencias",
+    "unidades",
+    "unidades disponibles",
+    "inventario",
+    "saldo",
+    "disponible",
+    "qty",
+    "quantity",
+    "on hand",
+}
+
+
+def convertir_numero(valor: object) -> float | None:
+    """Convierte cantidades con punto o coma decimal a número.
+
+    Se usa para el stock contado. No se interpretan valores no numéricos; el
+    operador simplemente no verá habilitado el ajuste si la columna no es
+    numérica.
+    """
+
+    texto = limpiar_espacios(valor)
+    if not texto:
+        return None
+    texto = re.sub(r"[^0-9,.\-]", "", texto)
+    if not texto:
+        return None
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif "," in texto or "." in texto:
+        separador = "," if "," in texto else "."
+        entero, _, decimales = texto.partition(separador)
+        # En inventarios, "1.250" normalmente significa mil doscientos
+        # cincuenta, no 1,25. Se respeta el cero inicial para decimales.
+        if len(decimales) == 3 and entero not in {"", "0", "-0"}:
+            texto = entero + decimales
+        else:
+            texto = entero + "." + decimales
+    try:
+        numero = float(texto)
+    except ValueError:
+        return None
+    if numero != numero or numero in {float("inf"), float("-inf")}:
+        return None
+    return numero
+
+
+def formatear_cantidad(valor: float | None) -> str:
+    if valor is None:
+        return ""
+    if float(valor).is_integer():
+        return str(int(valor))
+    return format(valor, ".4g")
 
 
 def normalizar_codigo_barras(valor: object) -> str:
@@ -225,6 +288,8 @@ class ArchivoMaestro:
     cargado_en: datetime
     huella: str
     formato: str
+    inactivos: dict[str, str] = field(default_factory=dict)
+    ajustes_locales: int = 0
 
     @property
     def total(self) -> int:
@@ -245,6 +310,19 @@ class ArchivoMaestro:
             indice.setdefault(registro.codigo_clave, registro)
         return indice
 
+    @cached_property
+    def columna_stock(self) -> str | None:
+        for columna in self.columnas:
+            if _normalizar_encabezado(columna) in _COLUMNAS_STOCK:
+                return columna
+        return None
+
+    def valor_stock(self, registro: RegistroMaestro) -> float | None:
+        columna = self.columna_stock
+        if not columna:
+            return None
+        return convertir_numero(registro.campos.get(columna, ""))
+
     def buscar(self, codigo: str) -> RegistroMaestro | None:
         clave = normalizar_codigo_barras(codigo)
         if not clave:
@@ -256,7 +334,7 @@ class ArchivoMaestro:
 
     def a_diccionario(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "ruta": str(self.ruta),
             "nombre": self.nombre,
             "hoja": self.hoja,
@@ -267,6 +345,8 @@ class ArchivoMaestro:
             "cargado_en": self.cargado_en.isoformat(),
             "huella": self.huella,
             "formato": self.formato,
+            "inactivos": self.inactivos,
+            "ajustes_locales": self.ajustes_locales,
             "registros": [
                 {
                     "codigo": r.codigo,
@@ -304,6 +384,11 @@ class ArchivoMaestro:
                 cargado_en=datetime.fromisoformat(datos["cargado_en"]),
                 huella=str(datos["huella"]),
                 formato=str(datos.get("formato", "snapshot")),
+                inactivos={
+                    str(k): str(v)
+                    for k, v in datos.get("inactivos", {}).items()
+                },
+                ajustes_locales=int(datos.get("ajustes_locales", 0)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ErrorArchivoMaestro(

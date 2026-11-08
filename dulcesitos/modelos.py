@@ -89,6 +89,20 @@ class RegistroSesion:
     escaneado_en: datetime
     operador_nombre: str
     operador_cedula: str
+    stock_original: float | None = None
+    stock_nuevo: float | None = None
+    stock_diferencia: float | None = None
+    ajuste_stock_en: datetime | None = None
+    origen: str = "lector"
+    novedad: str = ""
+
+    @property
+    def es_manual(self) -> bool:
+        return self.origen == "manual"
+
+    @property
+    def tiene_ajuste_stock(self) -> bool:
+        return self.stock_nuevo is not None
 
     @property
     def detalle_campos(self) -> str:
@@ -103,6 +117,8 @@ class EstadisticasSesion:
     duplicados: int = 0
     no_encontrados: int = 0
     ultima_lectura_en: datetime | None = None
+    ajustes_stock: int = 0
+    manuales: int = 0
 
     @property
     def total_lecturas(self) -> int:

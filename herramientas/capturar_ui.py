@@ -178,6 +178,24 @@ elif modo == "registro":
         app.inventario.procesar_escaneo(app.sesion, app.maestro, maestro.registros[i].codigo)
     app.inventario.procesar_escaneo(app.sesion, app.maestro, maestro.registros[0].codigo)
     app.inventario.procesar_escaneo(app.sesion, app.maestro, "9999999999999")
+    if maestro.columna_stock:
+        from dulcesitos.archivo_maestro import convertir_numero
+
+        registros = app.inventario.registros_sesion(app.sesion.id)
+        objetivo = registros[-1] if registros else None
+        original = (
+            convertir_numero(objetivo.campos.get(maestro.columna_stock, ""))
+            if objetivo is not None
+            else None
+        )
+        if original is not None:
+            app.inventario.ajustar_stock(
+                sesion=app.sesion,
+                maestro=maestro,
+                registro=objetivo,
+                stock_nuevo=original - 2,
+                operador=operador,
+            )
     while not app._cola_lector.empty():
         try:
             app._cola_lector.get_nowait()
@@ -266,10 +284,28 @@ elif modo == "admin_login":
     panel.destroy()
     app._cerrando = True
     app.destroy()
-elif modo in {"admin_lector", "admin_operadores", "admin_historial"}:
+elif modo in {"admin_lector", "admin_operadores", "admin_historial", "admin_catalogo"}:
     rutas, db = preparar()
     auth, admin, admin_svc, operador = sembrar(db, rutas)
     app = Aplicacion(rutas, db, iniciar_lector=False)
+    if modo == "admin_catalogo":
+        from dulcesitos.catalogo import ServicioCatalogo
+
+        catalogo = ServicioCatalogo(db)
+        maestro = cargar_maestro_actual(rutas.maestra)
+        catalogo.crear_producto(
+            admin=admin,
+            maestro=maestro,
+            codigo="7709999000123",
+            descripcion="Dulce de temporada",
+            campos={"Categoría": "Dulces", "Precio": "4800", "Stock": "18"},
+        )
+        catalogo.dar_de_baja(
+            admin=admin,
+            maestro=maestro,
+            codigo=maestro.registros[2].codigo,
+            motivo="Producto descontinuado",
+        )
     from dulcesitos.ui.panel_admin import PanelAdministracion
 
     panel = PanelAdministracion(app, app)
@@ -365,6 +401,43 @@ elif modo == "autorizacion":
     )
     dialogo.mostrar()
     capturar_ventana(dialogo, "09_autorizacion_cierre")
+    dialogo.cerrar()
+    app._cerrando = True
+    app.destroy()
+elif modo == "manual":
+    rutas, db = preparar()
+    auth, admin, admin_svc, operador = sembrar(db, rutas)
+    maestro = cargar_maestro_actual(rutas.maestra)
+    app = Aplicacion(rutas, db, iniciar_lector=False)
+    app.operador = operador
+    app.maestro = maestro
+    app.sesion = app.inventario.iniciar_sesion(
+        operador, maestro, maestro.registros[0].codigo
+    )
+    app.inventario.procesar_escaneo(
+        app.sesion, maestro, maestro.registros[0].codigo
+    )
+    from dulcesitos.ui.dialogos import DialogoRegistroManual
+
+    dialogo = DialogoRegistroManual(
+        app,
+        servicio=app.inventario,
+        sesion=app.sesion,
+        maestro=maestro,
+        operador=operador,
+    )
+    dialogo.mostrar()
+    dialogo.codigo.variable.set("SIN-CODIGO-ETIQUETA")
+    dialogo.descripcion.variable.set("Chocolatina Castillo doble")
+    dialogo.novedad.variable.set(
+        "Etiqueta deteriorada: el lector no detecta el código y no hay "
+        "coincidencia en el Excel."
+    )
+    if dialogo.stock is not None:
+        dialogo.stock.variable.set("176")
+    dialogo.update_idletasks()
+    dialogo.update()
+    capturar_ventana(dialogo, "06_registro_manual")
     dialogo.cerrar()
     app._cerrando = True
     app.destroy()

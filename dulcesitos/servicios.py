@@ -12,6 +12,7 @@ from .archivo_maestro import (
     ArchivoMaestro,
     ErrorArchivoMaestro,
     cargar_instantanea,
+    formatear_cantidad,
     guardar_instantanea,
     normalizar_codigo_barras,
 )
@@ -663,10 +664,19 @@ class ServicioInventario:
                 resultado="no_encontrado",
                 creado_en=ahora,
             )
-            LOG.info("Lectura no encontrada en sesión %s", sesion.id)
+            descripcion_baja = maestro.inactivos.get(clave)
+            if descripcion_baja:
+                mensaje = (
+                    f"Producto dado de baja: «{descripcion_baja}». "
+                    "No se registra en el inventario."
+                )
+                LOG.info("Lectura de producto inactivo en sesión %s", sesion.id)
+            else:
+                mensaje = f"Código no encontrado en el archivo maestro: {texto}"
+                LOG.info("Lectura no encontrada en sesión %s", sesion.id)
             return ResultadoEscaneo(
                 estado="no_encontrado",
-                mensaje=f"Código no encontrado en el archivo maestro: {texto}",
+                mensaje=mensaje,
                 codigo=texto,
                 codigo_clave=clave,
                 estadisticas=self.estadisticas(sesion.id),
@@ -721,6 +731,171 @@ class ServicioInventario:
         if not sesion.abierta:
             raise ErrorInventario("La sesión ya fue finalizada.")
         return self.db.deshacer_ultimo(sesion.id)
+
+    def registrar_manual(
+        self,
+        *,
+        sesion: Sesion,
+        maestro: ArchivoMaestro,
+        operador: SesionOperador,
+        codigo: str,
+        descripcion: str,
+        novedad: str,
+        stock: float | None = None,
+    ) -> Any:
+        """Registra un producto sin lectura del lector.
+
+        Se usa cuando el código no se puede leer o no existe en el maestro. El
+        registro queda marcado como ``manual`` y la novedad se conserva en la
+        sesión y en los archivos de salida.
+        """
+
+        if not sesion.abierta:
+            raise ErrorInventario("La sesión ya fue finalizada.")
+        codigo = str(codigo or "").strip()
+        descripcion = str(descripcion or "").strip()
+        novedad = str(novedad or "").strip()
+        if not codigo:
+            raise ErrorInventario("Escribe el código del producto.")
+        if len(codigo) > 200:
+            raise ErrorInventario("El código es demasiado largo.")
+        if not descripcion:
+            raise ErrorInventario("Escribe la descripción del producto.")
+        if len(descripcion) > 300:
+            raise ErrorInventario("La descripción no puede superar 300 caracteres.")
+        if not novedad:
+            raise ErrorInventario(
+                "Escribe la novedad: por qué se registra manualmente."
+            )
+        clave = normalizar_codigo_barras(codigo)
+        if not clave:
+            raise ErrorInventario("El código no es válido.")
+        if clave in maestro.inactivos:
+            raise ErrorInventario(
+                "Ese producto está dado de baja en el catálogo y no se puede registrar."
+            )
+        if self.db.obtener_registro_por_clave(sesion.id, clave) is not None:
+            raise ErrorInventario("Ese producto ya está registrado en la sesión.")
+        if stock is not None:
+            if not maestro.columna_stock:
+                raise ErrorInventario(
+                    "El archivo maestro no tiene una columna de stock reconocida."
+                )
+            if stock < 0:
+                raise ErrorInventario("El stock contado no puede ser negativo.")
+
+        producto = maestro.buscar(codigo)
+        if producto is not None:
+            campos = dict(producto.campos)
+            descripcion = producto.descripcion
+        else:
+            campos = {columna: "" for columna in maestro.columnas}
+        campos[maestro.columna_codigo] = codigo
+        campos[maestro.columna_descripcion] = descripcion
+        if stock is not None and maestro.columna_stock:
+            campos[maestro.columna_stock] = formatear_cantidad(stock)
+
+        ahora = a_iso(ahora_utc()) or ""
+        try:
+            _, registro = self.db.registrar_lectura(
+                sesion_id=sesion.id,
+                codigo_ingresado=codigo,
+                codigo_clave=clave,
+                resultado="registrado",
+                producto_codigo=codigo,
+                descripcion=descripcion,
+                datos=campos,
+                creado_en=ahora,
+                operador_nombre=operador.nombre,
+                operador_cedula=operador.cedula,
+                origen="manual",
+                novedad=novedad,
+            )
+        except ErrorBaseDatos as exc:
+            raise ErrorInventario(str(exc)) from exc
+        if registro is None:
+            raise ErrorInventario("No se pudo crear el registro manual.")
+        LOG.info(
+            "Registro manual en sesión %s: %s (%s)",
+            sesion.id,
+            codigo,
+            operador.cedula,
+        )
+        if stock is not None:
+            return self.ajustar_stock(
+                sesion=sesion,
+                maestro=maestro,
+                registro=registro,
+                stock_nuevo=stock,
+                operador=operador,
+            )
+        return self.db.obtener_registro_por_clave(sesion.id, clave) or registro
+
+    def ajustar_stock(
+        self,
+        *,
+        sesion: Sesion,
+        maestro: ArchivoMaestro,
+        registro: Any,
+        stock_nuevo: float,
+        operador: SesionOperador,
+    ) -> Any:
+        if not sesion.abierta:
+            raise ErrorInventario("La sesión ya fue finalizada.")
+        columna = maestro.columna_stock
+        if not columna:
+            raise ErrorInventario(
+                "El archivo maestro no tiene una columna de stock reconocida."
+            )
+        try:
+            nuevo = float(stock_nuevo)
+        except (TypeError, ValueError) as exc:
+            raise ErrorInventario("El stock contado debe ser un número.") from exc
+        if not (nuevo == nuevo) or nuevo in {float("inf"), float("-inf")}:
+            raise ErrorInventario("El stock contado no es un número válido.")
+        if nuevo < 0:
+            raise ErrorInventario("El stock contado no puede ser negativo.")
+        if registro is None or registro.sesion_id != sesion.id:
+            raise ErrorInventario("El registro no pertenece a la sesión activa.")
+        from .archivo_maestro import convertir_numero
+
+        original = convertir_numero(registro.campos.get(columna, ""))
+        diferencia = (nuevo - original) if original is not None else None
+        try:
+            self.db.guardar_ajuste_stock(
+                sesion_id=sesion.id,
+                registro_id=registro.id,
+                codigo=registro.codigo,
+                stock_original=original,
+                stock_nuevo=nuevo,
+                diferencia=diferencia,
+                operador_nombre=operador.nombre,
+                operador_cedula=operador.cedula,
+            )
+        except ErrorBaseDatos as exc:
+            raise ErrorInventario(str(exc)) from exc
+        actualizado = self.db.obtener_registro_por_clave(
+            sesion.id, registro.codigo_clave
+        )
+        if actualizado is None:
+            raise ErrorInventario("No se pudo recuperar el registro actualizado.")
+        LOG.info("Stock ajustado en sesión %s: %s -> %s", sesion.id, original, nuevo)
+        return actualizado
+
+    def quitar_ajuste_stock(
+        self, *, sesion: Sesion, registro: Any
+    ) -> Any:
+        if not sesion.abierta:
+            raise ErrorInventario("La sesión ya fue finalizada.")
+        if registro is None:
+            raise ErrorInventario("No hay un registro seleccionado.")
+        self.db.eliminar_ajuste_stock(registro.id)
+        actualizado = self.db.obtener_registro_por_clave(
+            sesion.id, registro.codigo_clave
+        )
+        if actualizado is None:
+            raise ErrorInventario("No se pudo recuperar el registro.")
+        return actualizado
 
     # ------------------------------------------------------------------
     # Cierre y exportación

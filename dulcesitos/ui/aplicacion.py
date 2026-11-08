@@ -15,6 +15,7 @@ from ..archivo_maestro import (
     cargar_maestro_actual,
 )
 from ..base_datos import BaseDatos
+from ..catalogo import ServicioCatalogo
 from ..config import APP_NAME, APP_SUBTITLE, APP_VERSION, RutasApp
 from ..lector import (
     EVENTO_ESTADO,
@@ -61,6 +62,7 @@ class Aplicacion(tk.Tk):
         self.auth = ServicioAutenticacion(db)
         self.administracion = ServicioAdministracion(db)
         self.inventario = ServicioInventario(db, rutas)
+        self.catalogo = ServicioCatalogo(db)
         self.sonidos = Sonidos()
 
         self.operador: SesionOperador | None = None
@@ -190,17 +192,6 @@ class Aplicacion(tk.Tk):
                 fondo=tema.FONDO,
                 takefocus=False,
             ).pack(side="right", padx=(8, 0))
-            Boton(
-                zona,
-                "Admin",
-                self.abrir_panel_admin,
-                variante="secundario",
-                ancho=90,
-                alto=34,
-                fuente=self._fuentes_app.pequena,
-                fondo=tema.FONDO,
-                takefocus=False,
-            ).pack(side="right", padx=(10, 0))
             perfil = tk.Frame(zona, bg=tema.FONDO)
             perfil.pack(side="right", padx=(10, 0))
             Avatar(
@@ -337,12 +328,13 @@ class Aplicacion(tk.Tk):
                 recuperado = False
                 try:
                     original = cargar_maestro_actual(self.rutas.maestra)
+                    original = self.catalogo.aplicar(original)
                     if original.huella == pendiente.maestro_hash:
                         self.maestro = original
                         self.catalogo_es_instantanea = True
                         self.error_maestro = None
                         recuperado = True
-                except ErrorArchivoMaestro:
+                except (ErrorArchivoMaestro, OSError):
                     recuperado = False
                 if not recuperado:
                     self.maestro = None
@@ -372,6 +364,7 @@ class Aplicacion(tk.Tk):
     def _cargar_catalogo_actual(self, *, silencioso: bool = False) -> bool:
         try:
             maestro = cargar_maestro_actual(self.rutas.maestra)
+            maestro = self.catalogo.aplicar(maestro)
         except ErrorArchivoMaestro as exc:
             self.maestro = None
             self.error_maestro = str(exc)
@@ -379,10 +372,56 @@ class Aplicacion(tk.Tk):
             if not silencioso:
                 LOG.warning("No se pudo cargar el catálogo: %s", exc)
             return False
+        except Exception as exc:
+            self.maestro = None
+            self.error_maestro = (
+                "No se pudieron aplicar los ajustes locales del catálogo. "
+                f"Detalle: {exc}"
+            )
+            self.catalogo_es_instantanea = False
+            LOG.exception("Error aplicando ajustes de catálogo")
+            return False
         self.maestro = maestro
         self.error_maestro = None
         self.catalogo_es_instantanea = False
         return True
+
+    def cargar_maestro_para_administracion(self) -> ArchivoMaestro:
+        """Carga el maestro vigente sin usar una instantánea de sesión."""
+
+        return cargar_maestro_actual(self.rutas.maestra)
+
+    def catalogo_actualizado_por_admin(self) -> str:
+        """Aplica al operador los cambios de altas/bajas cuando sea seguro."""
+
+        sesion_abierta = False
+        if self.operador is not None:
+            sesion_abierta = (
+                self.sesion is not None and self.sesion.estado == "abierta"
+            ) or self.inventario.sesion_abierta(self.operador.operador_id) is not None
+        if sesion_abierta or self.sesion_pendiente is not None:
+            return (
+                "Los cambios quedaron guardados. La sesión en curso conserva su "
+                "catálogo; se aplicarán al iniciar una nueva sesión."
+            )
+        if self.operador is None:
+            return (
+                "Los cambios se aplicarán automáticamente al próximo inicio de "
+                "sesión del operador."
+            )
+        self.calibrado = False
+        self.codigo_calibracion = ""
+        self.lector.invalidar_calibracion("El catálogo cambió; calibra de nuevo.")
+        if self._cargar_catalogo_actual():
+            if self._pantalla_actual is not None and hasattr(
+                self._pantalla_actual, "refrescar_catalogo"
+            ):
+                self._pantalla_actual.refrescar_catalogo()
+            return (
+                "La estación del operador se actualizó. Debe repetir la "
+                "calibración antes de registrar."
+            )
+        return "Los cambios se guardaron, pero no se pudo recargar la estación."
 
     def recargar_catalogo(self, *, mostrar_aviso: bool = True) -> bool:
         if self.sesion_pendiente is not None:

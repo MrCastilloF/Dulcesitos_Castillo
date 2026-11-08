@@ -1,0 +1,52 @@
+name: Publicar ejecutable
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Ejecutar pruebas
+        env:
+          PYTHONUTF8: "1"
+          DULCESITOS_SIN_SONIDO: "1"
+        run: python -m pytest
+
+      - name: Construir ejecutable
+        run: python -m PyInstaller --noconfirm --clean DulcesitosCastillo.spec
+
+      - name: Preparar ZIP y checksum
+        shell: pwsh
+        run: ./herramientas/preparar_distribucion.ps1 -Version 1.0.0
+
+      - name: Publicar en GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "dist\DulcesitosCastillo-1.0.0-win64.zip" `
+            "dist\DulcesitosCastillo-1.0.0-win64.zip.sha256" `
+            --title "Dulcesitos Castillo ${{ github.ref_name }}" `
+            --generate-notes `
+            --latest
