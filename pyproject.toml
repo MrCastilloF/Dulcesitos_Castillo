@@ -1,0 +1,36 @@
+[project]
+name = "dulcesitos-castillo-inventario"
+version = "1.0.0"
+description = "Registro y gestión de inventario para Dulcesitos Castillo (SENA)"
+authors = [{ name = "Carlos Castillo" }]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["pruebas"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "BLE001",  # la interfaz aísla fallos externos y muestra mensajes claros
+  "S110",    # los recursos opcionales (sonido, icono) no deben impedir el uso
+  "PLW1510", # subprocess.run controla el código de retorno explícitamente
+  "RUF012",  # listas de variantes de UI inmutables en la práctica
+  "SIM102",  # algunas condiciones anidadas documentan mejor la intención
+  "SIM105",  # se prefiere el try/except explícito en widgets Tk
+  "E501",    # el proyecto mantiene líneas legibles aunque superen 100 en UI
+  "RUF001",  # símbolos tipográficos intencionales en la interfaz
+  "PYI034",  # BaseDatos.__enter__ devuelve self en tiempo de ejecución
+  "E402",    # las herramientas configuran variables de entorno antes de importar
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pruebas/*" = ["RUF059", "SIM117"]
+"herramientas/*" = ["E402"]

@@ -1,0 +1,39 @@
+# Entornos y cachés
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Artefactos de compilación
+build/
+dist/
+*.spec.bak
+*.manifest
+
+# Datos locales y salidas
+*.db
+*.db-wal
+*.db-shm
+inventario.db
+salidas/
+sesiones/
+registros/
+respaldos/
+logs/
+*.log
+
+# Pruebas y capturas temporales
+.tmp/
+pruebas_temporales/
+capturas_temporales/
+
+# Configuración del sistema y material personal
+Thumbs.db
+desktop.ini
+.DS_Store
+Prompt Operador de Inventarios.txt
+
+# Recursos temporales de capturas
+docs/capturas/_*.png

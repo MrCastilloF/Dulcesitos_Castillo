@@ -1,0 +1,6 @@
+# Dependencias de ejecución · Python 3.10 o superior
+openpyxl==3.1.5
+reportlab==5.1.0
+pdfplumber==0.11.10
+pyserial==3.5
+xlrd==2.0.2
