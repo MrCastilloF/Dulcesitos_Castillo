@@ -1,5 +1,7 @@
 # Dulcesitos_Castillo · Operador de Inventarios
 
+[![Pruebas](https://github.com/MrCastilloF/Dulcesitos_Castillo/actions/workflows/pruebas.yml/badge.svg)](https://github.com/MrCastilloF/Dulcesitos_Castillo/actions/workflows/pruebas.yml)
+
 Aplicación de escritorio para **registrar y gestionar el inventario de bodega** de Dulcesitos Castillo (SENA, autor Carlos Castillo). Está pensada para operadores que trabajan de pie, con una mano ocupada y un lector USB de código de barras.
 
 > **Elección tecnológica (una línea):** Python + Tkinter permite una aplicación Windows autocontenida, sin servidor ni navegador, con acceso nativo al teclado HID/puerto serie, almacenamiento SQLite local y exportación a Excel, PDF y TXT mediante bibliotecas maduras.

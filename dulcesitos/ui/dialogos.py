@@ -437,7 +437,7 @@ class DialogoCodigoGenerado(DialogoBase):
         cuerpo = tk.Frame(self.tenedor, bg=tema.FONDO)
         cuerpo.pack(fill="both", expand=True, padx=28, pady=22)
 
-        Pildora(cuerpo, "CÓDIGO DE UN SOLO USO", "advertencia", fondo=tema.FONDO).pack(anchor="w")
+        Pildora(cuerpo, "SE MUESTRA UNA SOLA VEZ", "advertencia", fondo=tema.FONDO).pack(anchor="w")
         caja = tk.Frame(
             cuerpo,
             bg=tema.SUPERFICIE_2,
